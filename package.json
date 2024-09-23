@@ -1,0 +1,43 @@
+{
+  "version": "0.0.2",
+  "name": "hrserve",
+  "author": {
+    "name": "Andrey Sidorov",
+    "email": "andrey.sidorov@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sidorares/hrserve.git"
+  },
+  "bin": {
+    "hrserve": "./bin/hrserve.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "csstree-validator": "^3.0.0",
+    "mime-types": "^2.1.35",
+    "puppeteer": "^23.3.0",
+    "yargs": "^17.7.2"
+  },
+  "keywords": [
+    "dx",
+    "hmr",
+    "development server",
+    "hot reload",
+    "hot module replacement",
+    "live reload",
+    "live module replacement",
+    "live module swapping",
+    "live module updating",
+    "live module reloading"
+  ],
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/yargs": "^17.0.33"
+  }
+}
