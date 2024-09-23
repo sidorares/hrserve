@@ -7,7 +7,7 @@ import chokidar from "chokidar";
 import mime from "mime-types";
 import fs from "node:fs/promises";
 import path from "node:path";
-// import { validate } from "csstree-validator";
+import { validate } from "csstree-validator";
 
 const watchers = new Map();
 const patchers = new Map();
@@ -15,7 +15,7 @@ const scriptUrlToDetails = new Map();
 const stylesheetUrlToId = new Map();
 
 patchers.set("text/css", async (page, url, newContent) => {
-  const validationResult = cssValidator.validate(newContent, path);
+  const validationResult = validate(newContent, path);
   if (validationResult.length) {
     console.log("CSS validation failed:", validationResult);
     return;
