@@ -8,6 +8,7 @@ import mime from "mime-types";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { validate } from "csstree-validator";
+import { reloadImage } from "../lib/reload-image.js";
 
 const watchers = new Map();
 const patchers = new Map();
@@ -26,6 +27,13 @@ patchers.set("text/css", async (page, url, newContent) => {
     text: newContent,
   });
   console.log("result", result);
+});
+
+["application/png", "image/svg+xml", "image/jpeg", "image/gif", "image/webp"].forEach(mimeType => {
+  patchers.set(mimeType, async (page, url, newContent) => {
+    console.log("Reloading image", url);
+    await reloadImage(page, url);
+  });
 });
 
 patchers.set("application/javascript", async (page, url, scriptSource) => {
@@ -152,7 +160,9 @@ yargs(hideBin(process.argv))
         const url = request.url();
         console.log("Requesting", prefix, url);
         if (request.method() === "GET" && url.startsWith(prefix)) {
-          let filename = path.join(argv.dir, url.replace(prefix, ""));
+          const urlObj = new URL(url);
+          const urlNoSearch = urlObj.origin + urlObj.pathname;
+          let filename = path.join(argv.dir, urlNoSearch.slice(prefix.length));
           console.log("File exist?", filename);
           const fileExist = await fs
             .access(filename, fs.constants.F_OK)
@@ -184,8 +194,10 @@ yargs(hideBin(process.argv))
             status: 200,
             headers: {
               "Content-Type": mimeType,
+              "Cache-Control": "max-age=0, must-revalidate, no-store",
             },
           });
+          console.log('Mime type:', url, mimeType);
           if (!watchers.has(url)) {
             if (patchers.has(mimeType)) {
               const watcher = chokidar.watch(filename);
@@ -195,10 +207,8 @@ yargs(hideBin(process.argv))
                 const newContent = await fs.readFile(filename, "utf-8");
                 console.log("Patching", url);
                 patcher(page, url, newContent);
-
-                const doc = await cdp.send("DOM.getDocument", { depth: 10 });
-                console.log("Document", doc);
-        
+                //const doc = await cdp.send("DOM.getDocument", { depth: 10 });
+                //console.log("Document", doc);
               });
               watchers.set(url, watcher);
             }
