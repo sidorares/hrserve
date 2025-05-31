@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   id-token: write
 
 jobs:
@@ -28,7 +29,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: node
-
+          skip-labeling: true
+          
       - name: 📊 Debug Release Please Outputs
         run: |
           echo "releases_created: ${{ steps.release.outputs.releases_created }}"
