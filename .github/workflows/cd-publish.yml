@@ -30,7 +30,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: node
           skip-labeling: true
-
+          
       - name: 📊 Debug Release Please Outputs
         run: |
           echo "releases_created: ${{ steps.release.outputs.releases_created }}"

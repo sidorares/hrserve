@@ -199,7 +199,7 @@ yargs(hideBin(process.argv))
             },
           });
           console.log('Mime type:', url, mimeType);
-          if (!watchers.has(url)) {
+          if (!watchers.has(filename)) {
             if (patchers.has(mimeType)) {
               const watcher = chokidar.watch(filename);
               console.log("Watching:", filename, url);
@@ -211,7 +211,7 @@ yargs(hideBin(process.argv))
                 //const doc = await cdp.send("DOM.getDocument", { depth: 10 });
                 //console.log("Document", doc);
               });
-              watchers.set(url, watcher);
+              watchers.set(filename, watcher);
             }
           }
         } else {
