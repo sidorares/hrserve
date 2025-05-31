@@ -26,14 +26,8 @@ jobs:
         uses: googleapis/release-please-action@v4
         id: release
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           release-type: node
-          package-name: hrserve
-          changelog-types: |
-            [
-              {"type":"feat","section":"Features","hidden":false},
-              {"type":"fix","section":"Bug Fixes","hidden":false},
-              {"type":"chore","section":"Miscellaneous","hidden":false}
-            ]
 
       - name: 📊 Debug Release Please Outputs
         run: |
