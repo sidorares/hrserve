@@ -1,6 +1,6 @@
 #! /usr/bin/env node
 
-import puppeteer from "puppeteer";
+import { chromium } from "playwright";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import chokidar from "chokidar";
@@ -8,7 +8,7 @@ import mime from "mime-types";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { validate } from "csstree-validator";
-import { reloadImage } from "../lib/reload-image.js";
+import { reloadImage, IMAGE_MIME_TYPES } from "../lib/reload-image.js";
 
 const watchers = new Map();
 const patchers = new Map();
@@ -21,6 +21,7 @@ patchers.set("text/css", async (page, url, newContent) => {
     console.log("CSS validation failed:", validationResult);
     return;
   }
+  const cdp = await page.context().newCDPSession(page);
   const styleSheetId = stylesheetUrlToId.get(url);
   const result = await cdp.send("CSS.setStyleSheetText", {
     styleSheetId,
@@ -29,15 +30,15 @@ patchers.set("text/css", async (page, url, newContent) => {
   console.log("result", result);
 });
 
-["application/png", "image/svg+xml", "image/jpeg", "image/gif", "image/webp"].forEach(mimeType => {
+for (const mimeType of IMAGE_MIME_TYPES) {
   patchers.set(mimeType, async (page, url, newContent) => {
     console.log("Reloading image", url);
     await reloadImage(page, url);
   });
-});
+}
 
 patchers.set("application/javascript", async (page, url, scriptSource) => {
-  const cdp = await page.createCDPSession();
+  const cdp = await page.context().newCDPSession(page);
   const scriptDetails = scriptUrlToDetails.get(url);
   if (!scriptDetails) {
     return;
@@ -87,7 +88,7 @@ patchers.set("application/javascript", async (page, url, scriptSource) => {
 });
 
 patchers.set("text/html", async (page, _url, newContent) => {
-  const cdp = await page.createCDPSession();
+  const cdp = await page.context().newCDPSession(page);
   const {
     root: { nodeId: rootNodeId },
   } = await cdp.send("DOM.getDocument");
@@ -100,24 +101,23 @@ patchers.set("text/html", async (page, _url, newContent) => {
 yargs(hideBin(process.argv))
   .command(
     "$0 [dir]",
-    "Serve a page and watch for changes in html, js and css files",
+    "Serve a page, watch for changes in files used on a page and update page content when files are updated",
     (yargs) => {},
     async (argv) => {
-      console.log("-----", argv);
-      const browser = await puppeteer.launch({
+      const browser = await chromium.launch({
         headless: false,
         devtools: argv.devtools,
-        args: [`--window-size=${argv.width},${argv.height}`],
       });
 
       const prefix = argv.url;
 
-      const page = await browser.newPage();
+      const context = await browser.newContext({
+        viewport: { width: argv.width || 1280, height: argv.height || 720 }
+      });
+      const page = await context.newPage();
       await page.bringToFront();
       
-      await page.setRequestInterception(true);
-
-      const cdp = await page.createCDPSession();
+      const cdp = await page.context().newCDPSession(page);
       await cdp.send("Debugger.enable");
       await cdp.send("DOM.enable");
       await cdp.send("Page.enable");
@@ -156,7 +156,8 @@ yargs(hideBin(process.argv))
         watchEvent("DOM.documentUpdated");
         watchEvent("DOM.topLayerElementUpdated");
 
-      page.on("request", async (request) => {
+      // Use Playwright's route API for request interception
+      await page.route('**/*', async (route, request) => {
         const url = request.url();
         console.log("Requesting", prefix, url);
         if (request.method() === "GET" && url.startsWith(prefix)) {
@@ -181,7 +182,7 @@ yargs(hideBin(process.argv))
 
           if (!fileExist) {
             console.log("File does not exist", filename);
-            request.respond({
+            await route.fulfill({
               status: 404,
             });
             return;
@@ -189,7 +190,7 @@ yargs(hideBin(process.argv))
 
           const mimeType = mime.lookup(filename);
           const body = await fs.readFile(filename);
-          request.respond({
+          await route.fulfill({
             body: body,
             status: 200,
             headers: {
@@ -214,7 +215,7 @@ yargs(hideBin(process.argv))
             }
           }
         } else {
-          request.continue();
+          await route.continue();
         }
       });
       

@@ -17,7 +17,7 @@
     "chokidar": "^3.6.0",
     "csstree-validator": "^3.0.0",
     "mime-types": "^2.1.35",
-    "puppeteer": "^23.3.0",
+    "playwright": "^1.52.0",
     "yargs": "^17.7.2"
   },
   "keywords": [
