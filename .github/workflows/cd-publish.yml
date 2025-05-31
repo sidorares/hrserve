@@ -16,38 +16,73 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     name: Release Please
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
     steps:
       - name: 🤝 Release Please
         uses: googleapis/release-please-action@v4
         id: release
         with:
           release-type: node
+          package-name: hrserve
+          changelog-types: |
+            [
+              {"type":"feat","section":"Features","hidden":false},
+              {"type":"fix","section":"Bug Fixes","hidden":false},
+              {"type":"chore","section":"Miscellaneous","hidden":false}
+            ]
 
+      - name: 📊 Debug Release Please Outputs
+        run: |
+          echo "releases_created: ${{ steps.release.outputs.releases_created }}"
+          echo "release_created: ${{ steps.release.outputs.release_created }}"
+          echo "tag_name: ${{ steps.release.outputs.tag_name }}"
+          echo "prs_created: ${{ steps.release.outputs.prs_created }}"
+
+  publish:
+    needs: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: Publish to NPM
+    if: ${{ needs.release-please.outputs.releases_created }}
+    steps:
       - name: ➕ Actions - Checkout
         uses: actions/checkout@v4
-        if: ${{ steps.release.outputs.releases_created }}
 
       - name: ➕ Actions - Setup Node.js
         uses: actions/setup-node@v4
-        if: ${{ steps.release.outputs.releases_created }}
         with:
           node-version: '22.x'
           registry-url: 'https://registry.npmjs.org'
 
       - name: ➕ Cache dependencies
         uses: actions/cache@v4
-        if: ${{ steps.release.outputs.releases_created }}
         with:
           path: ~/.npm
           key: npm-linux-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-linux-
 
       - name: 📦 Installing Dependencies
-        if: ${{ steps.release.outputs.releases_created }}
         run: npm ci
 
+      - name: 🔍 Check package version before publish
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          echo "Package version: $PACKAGE_VERSION"
+          echo "Tag name: ${{ needs.release-please.outputs.tag_name }}"
+          
+          # Check if version exists on npm
+          if npm view hrserve@$PACKAGE_VERSION version 2>/dev/null; then
+            echo "❌ Version $PACKAGE_VERSION already exists on npm"
+            exit 1
+          else
+            echo "✅ Version $PACKAGE_VERSION is new, proceeding with publish"
+          fi
+
       - name: 📥 Publishing Package
-        if: ${{ steps.release.outputs.releases_created }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance
