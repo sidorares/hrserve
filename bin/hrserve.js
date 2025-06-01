@@ -1,102 +1,9 @@
-#! /usr/bin/env node
+#!/usr/bin/env node
 
 import { chromium } from "playwright";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import chokidar from "chokidar";
-import mime from "mime-types";
-import fs from "node:fs/promises";
-import path from "node:path";
-import { validate } from "csstree-validator";
-import { reloadImage, IMAGE_MIME_TYPES } from "../lib/reload-image.js";
-
-const watchers = new Map();
-const patchers = new Map();
-const scriptUrlToDetails = new Map();
-const stylesheetUrlToId = new Map();
-
-patchers.set("text/css", async (page, url, newContent) => {
-  const validationResult = validate(newContent, path);
-  if (validationResult.length) {
-    console.log("CSS validation failed:", validationResult);
-    return;
-  }
-  const cdp = await page.context().newCDPSession(page);
-  const styleSheetId = stylesheetUrlToId.get(url);
-  const result = await cdp.send("CSS.setStyleSheetText", {
-    styleSheetId,
-    text: newContent,
-  });
-  console.log("result", result);
-});
-
-for (const mimeType of IMAGE_MIME_TYPES) {
-  patchers.set(mimeType, async (page, url, newContent) => {
-    console.log("Reloading image", url);
-    await reloadImage(page, url);
-  });
-}
-
-patchers.set("application/javascript", async (page, url, scriptSource) => {
-  const cdp = await page.context().newCDPSession(page);
-  const scriptDetails = scriptUrlToDetails.get(url);
-  if (!scriptDetails) {
-    return;
-  }
-  await cdp.send("Debugger.enable");
-  const result = await cdp.send("Debugger.setScriptSource", {
-    scriptId: scriptDetails.scriptId,
-    scriptSource,
-    allowTopFrameEditing: true,
-  });
-
-  console.log("result", result);
-  if (result.status !== "Ok") {
-    return;
-  }
-
-  const detail = JSON.stringify({
-    detail: {
-      scriptUrl: url,
-    },
-  });
-  const expression = `(function() {
-        const event = new CustomEvent(
-          'script-patch',
-          ${detail}  
-        );
-        window.dispatchEvent(event);
-      })();`;
-
-  await cdp.send("Runtime.evaluate", {
-    expression,
-  });
-
-  try {
-    console.log(
-      "evaluating in script context",
-      scriptDetails.executionContextId
-    );
-    const r = await cdp.send("Runtime.evaluate", {
-      expression: "import.meta",
-      contextId: scriptDetails.executionContextId,
-    });
-    console.log("Runtime.evaluate", r);
-  } catch (e) {
-    console.log("Error evaluating", e);
-  }
-});
-
-patchers.set("text/html", async (page, _url, newContent) => {
-  const cdp = await page.context().newCDPSession(page);
-  const {
-    root: { nodeId: rootNodeId },
-  } = await cdp.send("DOM.getDocument");
-  await cdp.send("DOM.setOuterHTML", {
-    nodeId: rootNodeId,
-    outerHTML: newContent,
-  });
-});
+import { createServer } from "../lib/hrserve.js";
 
 yargs(hideBin(process.argv))
   .command(
@@ -109,119 +16,20 @@ yargs(hideBin(process.argv))
         devtools: argv.devtools,
       });
 
-      const prefix = argv.url;
-
-      const context = await browser.newContext({
-        viewport: { width: argv.width || 1280, height: argv.height || 720 }
-      });
-      const page = await context.newPage();
-      await page.bringToFront();
+      const server = createServer(browser);
       
-      const cdp = await page.context().newCDPSession(page);
-      await cdp.send("Debugger.enable");
-      await cdp.send("DOM.enable");
-      await cdp.send("Page.enable");
-      await cdp.send("CSS.enable");
-      await cdp.send("Runtime.enable");
-      cdp.on("Debugger.scriptParsed", (event) => {
-        // console.log("Script parsed", event);
-        scriptUrlToDetails.set(event.url, event);
-      });
-      cdp.on("CSS.styleSheetAdded", (event) => {
-        stylesheetUrlToId.set(
-          event.header.sourceURL,
-          event.header.styleSheetId
-        );
+      // Listen for patch events
+      server.on('patch', ({ fileName, mimeType }) => {
+        console.log(`File patched: ${fileName} (${mimeType})`);
       });
 
-      const watchEvent = (name) => {
-        cdp.on(name, (event) => {
-            console.log(name, event);
-        });
-      };
-
-      watchEvent("DOM.attributeModified");
-      watchEvent("DOM.attributeRemoved");
-        watchEvent("DOM.characterDataModified");
-        watchEvent("DOM.childNodeCountUpdated");
-        watchEvent("DOM.childNodeInserted");
-        watchEvent("DOM.childNodeRemoved");
-        watchEvent("DOM.distributedNodesUpdated");
-        watchEvent("DOM.inlineStyleInvalidated");
-        watchEvent("DOM.pseudoElementAdded");
-        watchEvent("DOM.pseudoElementRemoved");
-        watchEvent("DOM.setChildNodes");
-        watchEvent("DOM.shadowRootPopped");
-        watchEvent("DOM.shadowRootPushed");
-        watchEvent("DOM.documentUpdated");
-        watchEvent("DOM.topLayerElementUpdated");
-
-      // Use Playwright's route API for request interception
-      await page.route('**/*', async (route, request) => {
-        const url = request.url();
-        console.log("Requesting", prefix, url);
-        if (request.method() === "GET" && url.startsWith(prefix)) {
-          const urlObj = new URL(url);
-          const urlNoSearch = urlObj.origin + urlObj.pathname;
-          let filename = path.join(argv.dir, urlNoSearch.slice(prefix.length));
-          console.log("File exist?", filename);
-          const fileExist = await fs
-            .access(filename, fs.constants.F_OK)
-            .then(() => true)
-            .catch(() => false);
-
-          console.log("File exist?", fileExist);
-
-          if (url.endsWith("/")) {
-            filename = path.join(
-              argv.dir,
-              url.replace(prefix, ""),
-              "index.html"
-            );
-          }
-
-          if (!fileExist) {
-            console.log("File does not exist", filename);
-            await route.fulfill({
-              status: 404,
-            });
-            return;
-          }
-
-          const mimeType = mime.lookup(filename);
-          const body = await fs.readFile(filename);
-          await route.fulfill({
-            body: body,
-            status: 200,
-            headers: {
-              "Content-Type": mimeType,
-              "Cache-Control": "max-age=0, must-revalidate, no-store",
-            },
-          });
-          console.log('Mime type:', url, mimeType);
-          if (!watchers.has(url)) {
-            if (patchers.has(mimeType)) {
-              const watcher = chokidar.watch(filename);
-              console.log("Watching:", filename, url);
-              const patcher = patchers.get(mimeType);
-              watcher.on("change", async () => {
-                const newContent = await fs.readFile(filename, "utf-8");
-                console.log("Patching", url);
-                patcher(page, url, newContent);
-                //const doc = await cdp.send("DOM.getDocument", { depth: 10 });
-                //console.log("Document", doc);
-              });
-              watchers.set(url, watcher);
-            }
-          }
-        } else {
-          await route.continue();
-        }
+      await server.serve({
+        url: argv.url,
+        dir: argv.dir,
+        width: argv.width,
+        height: argv.height,
+        devtools: argv.devtools,
       });
-      
-
-      console.log("Opening page", argv.url);
-      await page.goto(argv.url);
     }
   )
   .option("url", {
@@ -250,5 +58,4 @@ yargs(hideBin(process.argv))
     type: "number",
     description: "Height of the browser window",
   })
-
   .parse();
