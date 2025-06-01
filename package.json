@@ -10,9 +10,18 @@
     "url": "git+https://github.com/sidorares/hrserve.git"
   },
   "bin": {
-    "hrserve": "./bin/hrserve.js"
+    "hrserve": "./dist/bin/hrserve.js"
   },
+  "main": "./dist/lib/hrserve.js",
+  "types": "./dist/lib/hrserve.d.ts",
   "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "dev:ts": "node --experimental-strip-types bin/hrserve.ts",
+    "prepublishOnly": "npm run build",
+    "clean": "rm -rf dist"
+  },
   "dependencies": {
     "chokidar": "^3.6.0",
     "csstree-validator": "^3.0.0",
@@ -33,11 +42,13 @@
     "live module reloading"
   ],
   "files": [
-    "bin",
-    "lib"
+    "dist"
   ],
   "devDependencies": {
     "@types/mime-types": "^2.1.4",
-    "@types/yargs": "^17.0.33"
+    "@types/node": "^22.10.2",
+    "@types/yargs": "^17.0.33",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.2"
   }
 }
