@@ -1,5 +1,5 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "name": "hrserve",
   "author": {
     "name": "Andrey Sidorov",
@@ -13,7 +13,8 @@
     "hrserve": "./dist/bin/hrserve.js"
   },
   "main": "./dist/lib/hrserve.js",
-  "types": "./dist/lib/hrserve.d.ts",  "scripts": {
+  "types": "./dist/lib/hrserve.d.ts",
+  "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "dev:ts": "node --experimental-strip-types bin/hrserve.ts",
