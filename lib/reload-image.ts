@@ -1,18 +1,27 @@
+import type { Page } from 'playwright';
+
 export const IMAGE_MIME_TYPES = [
   "image/png",
   "image/svg+xml", 
   "image/jpeg",
   "image/gif",
   "image/webp"
-];
+] as const;
 
-export async function reloadImage(page, targetUrl) {
+interface ImageReloadResult {
+  success: boolean;
+  updatedCount: number;
+  targetUrl: string;
+  timestamp: number;
+}
+
+export async function reloadImage(page: Page, targetUrl: string): Promise<ImageReloadResult> {
   return await page.evaluate((targetUrl) => {
     const timestamp = Date.now();
     let updatedCount = 0;
     
     // Helper function to normalize URLs for comparison
-    const normalizeUrl = (url, baseUrl = window.location.href) => {
+    const normalizeUrl = (url: string, baseUrl = window.location.href) => {
       try {
         return new URL(url, baseUrl).href;
       } catch (e) {
@@ -21,7 +30,7 @@ export async function reloadImage(page, targetUrl) {
     };
     
     // Helper function to check if URL matches (handles relative URLs)
-    const urlMatches = (url1, url2) => {
+    const urlMatches = (url1: string, url2: string) => {
       // Remove cache busters before comparing
       const clean1 = url1.replace(/([?&])_t=\d+(&|$)/, (match, p1, p2) => p2 ? p1 : '');
       const clean2 = url2.replace(/([?&])_t=\d+(&|$)/, (match, p1, p2) => p2 ? p1 : '');
@@ -29,7 +38,7 @@ export async function reloadImage(page, targetUrl) {
     };
     
     // Helper function to add cache buster to URL
-    const addCacheBuster = (url) => {
+    const addCacheBuster = (url: string) => {
       // Remove existing cache buster if present
       const cleanUrl = url.replace(/([?&])_t=\d+(&|$)/, (match, p1, p2) => {
         return p2 ? p1 : '';
@@ -44,7 +53,8 @@ export async function reloadImage(page, targetUrl) {
       try {
         const rules = Array.from(sheet.cssRules || sheet.rules || []);
         for (const rule of rules) {
-          if (rule.style) {
+          if ((rule as CSSStyleRule).style) {
+            const styleRule = rule as CSSStyleRule;
             // Check all properties that might contain URLs
             const urlProperties = [
               'backgroundImage',
@@ -54,10 +64,10 @@ export async function reloadImage(page, targetUrl) {
               'borderImageSource',
               'maskImage',
               'webkitMaskImage'
-            ];
+            ] as const;
             
             for (const prop of urlProperties) {
-              const value = rule.style[prop];
+              const value = styleRule.style.getPropertyValue(prop) || (styleRule.style as unknown as Record<string, string>)[prop];
               if (value?.includes('url(')) {
                 // Extract and check URLs
                 const urlRegex = /url\(['"]?([^'")]+)['"]?\)/g;
@@ -76,7 +86,7 @@ export async function reloadImage(page, targetUrl) {
                 }
                 
                 if (changed) {
-                  rule.style[prop] = newValue;
+                  styleRule.style.setProperty(prop, newValue);
                   updatedCount++;
                 }
               }
@@ -90,7 +100,7 @@ export async function reloadImage(page, targetUrl) {
     }
     
     // 2. Update inline styles
-    const elementsWithStyle = document.querySelectorAll('[style]');
+    const elementsWithStyle = document.querySelectorAll('[style]') as NodeListOf<HTMLElement>;
     for (const element of elementsWithStyle) {
       const style = element.style;
       const urlProperties = [
@@ -101,10 +111,10 @@ export async function reloadImage(page, targetUrl) {
         'borderImageSource',
         'maskImage',
         'webkitMaskImage'
-      ];
+      ] as const;
       
       for (const prop of urlProperties) {
-        const value = style[prop];
+        const value = style.getPropertyValue(prop) || (style as unknown as Record<string, string>)[prop];
         if (value?.includes('url(')) {
           const urlRegex = /url\(['"]?([^'")]+)['"]?\)/g;
           let match = urlRegex.exec(value);
@@ -122,7 +132,7 @@ export async function reloadImage(page, targetUrl) {
           }
           
           if (changed) {
-            style[prop] = newValue;
+            style.setProperty(prop, newValue);
             updatedCount++;
           }
         }
@@ -156,7 +166,7 @@ export async function reloadImage(page, targetUrl) {
     }
     
     // 4. Update source elements (in picture elements)
-    const sourceElements = document.querySelectorAll('source');
+    const sourceElements = document.querySelectorAll('source') as NodeListOf<HTMLSourceElement>;
     for (const source of sourceElements) {
       if (source.srcset) {
         const srcsetParts = source.srcset.split(',').map(s => s.trim());
@@ -176,10 +186,18 @@ export async function reloadImage(page, targetUrl) {
     }
     
     // 5. Update object/embed elements
-    const objectElements = document.querySelectorAll('object, embed');
+    const objectElements = document.querySelectorAll('object') as NodeListOf<HTMLObjectElement>;
     for (const obj of objectElements) {
       if (obj.data && urlMatches(obj.data, targetUrl)) {
         obj.data = addCacheBuster(obj.data);
+        updatedCount++;
+      }
+    }
+    
+    const embedElements = document.querySelectorAll('embed') as NodeListOf<HTMLEmbedElement>;
+    for (const embed of embedElements) {
+      if (embed.src && urlMatches(embed.src, targetUrl)) {
+        embed.src = addCacheBuster(embed.src);
         updatedCount++;
       }
     }
@@ -199,7 +217,7 @@ export async function reloadImage(page, targetUrl) {
     }
     
     // 7. Update link elements (favicons, etc.)
-    const linkElements = document.querySelectorAll('link[rel*="icon"]');
+    const linkElements = document.querySelectorAll('link[rel*="icon"]') as NodeListOf<HTMLLinkElement>;
     for (const link of linkElements) {
       if (link.href && urlMatches(link.href, targetUrl)) {
         link.href = addCacheBuster(link.href);
@@ -208,7 +226,7 @@ export async function reloadImage(page, targetUrl) {
     }
     
     // 8. Update input elements with type="image"
-    const inputImages = document.querySelectorAll('input[type="image"]');
+    const inputImages = document.querySelectorAll('input[type="image"]') as NodeListOf<HTMLInputElement>;
     for (const input of inputImages) {
       if (input.src && urlMatches(input.src, targetUrl)) {
         input.src = addCacheBuster(input.src);

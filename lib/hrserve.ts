@@ -4,18 +4,56 @@ import mime from "mime-types";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { validate } from "csstree-validator";
-import { reloadImage, IMAGE_MIME_TYPES } from "./reload-image.js";
+import { reloadImage, IMAGE_MIME_TYPES } from "./reload-image";
+import type { Browser, Page, Route, Request } from 'playwright';
 
-export function createServer(browser) {
-  const server = new EventEmitter();
-  const watchers = new Map();
-  const patchers = new Map();
-  const scriptUrlToDetails = new Map();
-  const stylesheetUrlToId = new Map();
+interface ServeOptions {
+  url: string;
+  dir: string;
+  width?: number;
+  height?: number;
+  devtools?: boolean;
+}
+
+interface PatchEvent {
+  fileName: string;
+  url?: string;
+  mimeType: string;
+}
+
+interface NewResourceEvent {
+  url: string;
+  mimeType: string;
+}
+
+interface HRServer extends EventEmitter {
+  serve(options: ServeOptions): Promise<Page>;
+  on(event: 'patch', listener: (data: PatchEvent) => void): this;
+  on(event: 'new-resource', listener: (data: NewResourceEvent) => void): this;
+  emit(event: 'patch', data: PatchEvent): boolean;
+  emit(event: 'new-resource', data: NewResourceEvent): boolean;
+}
+
+type PatcherFunction = (page: Page, url: string, newContent?: string, fileName?: string) => Promise<void>;
+
+interface ScriptDetails {
+  scriptId: string;
+  executionContextId?: number;
+  url: string;
+}
+
+export function createServer(browser: Browser): HRServer {
+  const server = new EventEmitter() as HRServer;
+  const watchers = new Map<string, chokidar.FSWatcher>();
+  const patchers = new Map<string, PatcherFunction>();
+  const scriptUrlToDetails = new Map<string, ScriptDetails>();
+  const stylesheetUrlToId = new Map<string, string>();
 
   // Setup patchers for different MIME types
-  patchers.set("text/css", async (page, url, newContent, fileName) => {
-    const validationResult = validate(newContent, path);
+  patchers.set("text/css", async (page: Page, url: string, newContent?: string, fileName?: string) => {
+    if (!newContent || !fileName) return;
+    
+    const validationResult = validate(newContent, fileName);
     // TODO: config / cli option to allow patching invalid css
     if (validationResult.length) {
       console.log("CSS validation failed:", validationResult);
@@ -23,19 +61,23 @@ export function createServer(browser) {
     }
     const cdp = await page.context().newCDPSession(page);
     const styleSheetId = stylesheetUrlToId.get(url);
-    await cdp.send("CSS.setStyleSheetText", {
-      styleSheetId,
-      text: newContent,
-    });    
+    if (styleSheetId) {
+      await cdp.send("CSS.setStyleSheetText", {
+        styleSheetId,
+        text: newContent,
+      });
+    }
   });
 
   for (const mimeType of IMAGE_MIME_TYPES) {
-    patchers.set(mimeType, async (page, url) => {
+    patchers.set(mimeType, async (page: Page, url: string) => {
       await reloadImage(page, url);
     });
   }
 
-  patchers.set("application/javascript", async (page, url, scriptSource, fileName) => {
+  patchers.set("application/javascript", async (page: Page, url: string, scriptSource?: string, fileName?: string) => {
+    if (!scriptSource || !fileName) return;
+    
     const cdp = await page.context().newCDPSession(page);
     const scriptDetails = scriptUrlToDetails.get(url);
     if (!scriptDetails) {
@@ -87,7 +129,9 @@ export function createServer(browser) {
     server.emit('patch', { fileName, mimeType: 'application/javascript' });
   });
 
-  patchers.set("text/html", async (page, _url, newContent, fileName) => {
+  patchers.set("text/html", async (page: Page, _url: string, newContent?: string, fileName?: string) => {
+    if (!newContent || !fileName) return;
+    
     const cdp = await page.context().newCDPSession(page);
     const {
       root: { nodeId: rootNodeId },
@@ -100,7 +144,7 @@ export function createServer(browser) {
   });
 
   // Main server functionality
-  server.serve = async (options) => {
+  server.serve = async (options: ServeOptions): Promise<Page> => {
     const { url: targetUrl, dir, width = 1280, height = 720, devtools = false } = options;
 
     const context = await browser.newContext({
@@ -116,7 +160,7 @@ export function createServer(browser) {
     await cdp.send("Runtime.enable");
     
     cdp.on("Debugger.scriptParsed", (event) => {
-      scriptUrlToDetails.set(event.url, event);
+      scriptUrlToDetails.set(event.url, event as ScriptDetails);
     });
     
     cdp.on("CSS.styleSheetAdded", (event) => {
@@ -126,8 +170,9 @@ export function createServer(browser) {
       );
     });
 
-    const watchEvent = (name) => {
-      cdp.on(name, (event) => {
+    const watchEvent = (name: string) => {
+      // Using unknown instead of any for better type safety
+      (cdp as { on: (event: string, listener: (event: unknown) => void) => void }).on(name, (event: unknown) => {
           // we'll be reacting on content change
           // to allow bidirectional sync 
           // ( for example, "Edit as HTML in devtools" -> file content updated on fs)
@@ -156,19 +201,18 @@ export function createServer(browser) {
       //console.log('Frame attached:', frame.url());
     });
 
-
     // Use Playwright's route API for request interception
-    await page.route('**/*', async (route, request) => {
+    await page.route('**/*', async (route: Route, request: Request) => {
       const url = request.url();
       if (request.method() === "GET" && url.startsWith(targetUrl)) {
         const urlObj = new URL(url);
         const urlNoSearch = urlObj.origin + urlObj.pathname;
         let fileName = path.join(dir, urlNoSearch.slice(targetUrl.length));
+        
         const fileExist = await fs
           .access(fileName, fs.constants.F_OK)
           .then(() => true)
           .catch(() => false);
-
 
         if (urlNoSearch.endsWith("/")) {
           fileName = path.join(
@@ -186,6 +230,13 @@ export function createServer(browser) {
         }
 
         const mimeType = mime.lookup(fileName);
+        if (!mimeType) {
+          await route.fulfill({
+            status: 404,
+          });
+          return;
+        }
+
         const body = await fs.readFile(fileName);
         await route.fulfill({
           body,
@@ -195,23 +246,27 @@ export function createServer(browser) {
             "Cache-Control": "max-age=0, must-revalidate, no-store",
           },
         });
+        
         if (!watchers.has(url)) {
           if (patchers.has(mimeType)) {
             const watcher = chokidar.watch(fileName);
             const patcher = patchers.get(mimeType);
-            watcher.on("change", async () => {
-              const newContent = await fs.readFile(fileName, "utf-8");
-              await patcher(page, url, newContent, fileName);
-              server.emit('patch', { fileName, url, mimeType });
-            });
-            server.emit('new-resource', { url, mimeType });
-            watchers.set(url, watcher);
+            if (patcher) {
+              watcher.on("change", async () => {
+                const newContent = await fs.readFile(fileName, "utf-8");
+                await patcher(page, url, newContent, fileName);
+                server.emit('patch', { fileName, url, mimeType });
+              });
+              server.emit('new-resource', { url, mimeType });
+              watchers.set(url, watcher);
+            }
           }
         }
       } else {
         await route.continue();
       }
     });
+    
     await page.goto(targetUrl);
     return page;
   };

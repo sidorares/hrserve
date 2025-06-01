@@ -1,16 +1,27 @@
-#!/usr/bin/env node
-
 import { chromium } from "playwright";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { createServer } from "../lib/hrserve.js";
+import type { ArgumentsCamelCase, Argv } from "yargs";
+
+import { createServer } from "../lib/hrserve";
+
+interface CLIArgs {
+  dir?: string;
+  url: string;
+  width?: number;
+  height?: number;
+  devtools: boolean;
+  verbose?: boolean;
+}
 
 yargs(hideBin(process.argv))
   .command(
     "$0 [dir]",
     "Serve a page, watch for changes in files used on a page and update page content when files are updated",
-    (yargs) => {},
-    async (argv) => {
+    (yargs: Argv) => {
+      return yargs;
+    },
+    async (argv: ArgumentsCamelCase<CLIArgs>) => {
       const browser = await chromium.launch({
         headless: false,
         devtools: argv.devtools,
@@ -25,7 +36,7 @@ yargs(hideBin(process.argv))
 
       await server.serve({
         url: argv.url,
-        dir: argv.dir,
+        dir: argv.dir || process.cwd(),
         width: argv.width,
         height: argv.height,
         devtools: argv.devtools,
@@ -58,4 +69,4 @@ yargs(hideBin(process.argv))
     type: "number",
     description: "Height of the browser window",
   })
-  .parse();
+  .parse(); 
