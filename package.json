@@ -13,9 +13,7 @@
     "hrserve": "./dist/bin/hrserve.js"
   },
   "main": "./dist/lib/hrserve.js",
-  "types": "./dist/lib/hrserve.d.ts",
-  "type": "module",
-  "scripts": {
+  "types": "./dist/lib/hrserve.d.ts",  "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "dev:ts": "node --experimental-strip-types bin/hrserve.ts",
