@@ -30,9 +30,9 @@ yargs(hideBin(process.argv))
       });
 
       const server = createServer(browser);
-      
+
       // Listen for patch events
-      server.on('patch', ({ fileName, mimeType }) => {
+      server.on("patch", ({ fileName, mimeType }) => {
         console.log(`File patched: ${fileName} (${mimeType})`);
       });
 
@@ -48,7 +48,7 @@ yargs(hideBin(process.argv))
   .option("url", {
     describe: "Base url of the page",
     type: "string",
-    default: "https://www.google.com",
+    default: "http://localhost:3000/",
   })
   .option("devtools", {
     alias: "d",
@@ -71,4 +71,4 @@ yargs(hideBin(process.argv))
     type: "number",
     description: "Height of the browser window",
   })
-  .parse(); 
+  .parse();
