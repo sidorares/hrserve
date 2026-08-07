@@ -57,7 +57,7 @@ Tests use the built-in `node:test` runner with `tsx` for TypeScript — no test 
 
 ## Releases & commit style
 
-Releases are automated with release-please (`.github/workflows/cd-publish.yml`, see `RELEASE.md`). **Commit messages and PR titles must follow Conventional Commits** (`feat:`, `fix:`, `test:`, `chore:`...) — they drive the version bump and changelog. Merging the auto-generated release PR publishes to npm (`prepublishOnly` builds `dist/`; only `dist` ships, see `files` in package.json).
+Releases are automated with release-please (`.github/workflows/cd-publish.yml`, see `RELEASE.md`). **Commit messages and PR titles must follow Conventional Commits** (`feat:`, `fix:`, `test:`, `chore:`...) — they drive the version bump and changelog. Merging the auto-generated release PR publishes to npm (`prepublishOnly` builds `dist/`; only `dist` ships, see `files` in package.json). Publishing authenticates via npm trusted publishing (OIDC) — no token secret; the trusted publisher is registered on npmjs.com against `cd-publish.yml`, so renaming that workflow file breaks publishing until the npm-side setting is updated.
 
 CI (`.github/workflows/ci.yml`) runs lint, build, and both test suites on every PR.
 

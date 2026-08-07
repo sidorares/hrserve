@@ -6,17 +6,15 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  id-token: write
-
 jobs:
   release-please:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     name: Release Please
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       release_created: ${{ steps.release.outputs.release_created }}
@@ -38,12 +36,19 @@ jobs:
           echo "tag_name: ${{ steps.release.outputs.tag_name }}"
           echo "prs_created: ${{ steps.release.outputs.prs_created }}"
 
+  # Publishes via npm trusted publishing (OIDC) — no NPM_TOKEN secret.
+  # One-time setup on npmjs.com (package Settings → Trusted Publisher):
+  #   GitHub Actions / user: sidorares / repository: hrserve /
+  #   workflow filename: cd-publish.yml (no environment)
   publish:
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 15
     name: Publish to NPM
     if: ${{ needs.release-please.outputs.releases_created }}
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token npm exchanges for publish credentials
     steps:
       - name: ➕ Actions - Checkout
         uses: actions/checkout@v4
@@ -51,15 +56,11 @@ jobs:
       - name: ➕ Actions - Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22.x'
+          # Trusted publishing needs npm >= 11.5.1; Node 24 bundles it (22.x ships npm 10)
+          node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: ➕ Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-linux-${{ hashFiles('package-lock.json') }}
-          restore-keys: npm-linux-
+      # No dependency cache here on purpose: release builds should not trust caches
 
       - name: 📦 Installing Dependencies
         run: npm ci
@@ -79,6 +80,6 @@ jobs:
           fi
 
       - name: 📥 Publishing Package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance
+        # No NODE_AUTH_TOKEN: npm authenticates via OIDC (trusted publishing)
+        # and generates provenance attestations automatically.
+        run: npm publish
