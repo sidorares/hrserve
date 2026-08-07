@@ -121,8 +121,9 @@ export function createServer(browser: Browser): HRServer {
         console.warn("Failed to patch script", result);
       }
     } catch (e) {
-      // Chromium removed LiveEdit (Debugger.setScriptSource) in 2025. The
-      // script-patch event below is the reliable way for pages to react.
+      // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145:
+      // https://developer.chrome.com/blog/devtools-deprecates-live-editing
+      // The script-patch event below is the reliable way for pages to react.
       if (!liveEditUnavailableWarned) {
         liveEditUnavailableWarned = true;
         console.warn("Live script patching unavailable in this browser:", (e as Error).message);

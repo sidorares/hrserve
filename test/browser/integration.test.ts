@@ -162,9 +162,10 @@ describe("hrserve integration", () => {
     }
   });
 
-  // Chromium removed LiveEdit (Debugger.setScriptSource) in 2025, so the
-  // in-place body swap can no longer be asserted; the guaranteed contract is
-  // the script-patch event that lets page code react to the change.
+  // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145
+  // (https://developer.chrome.com/blog/devtools-deprecates-live-editing), so
+  // the in-place body swap can no longer be asserted; the guaranteed contract
+  // is the script-patch event that lets page code react to the change.
   it("dispatches script-patch on the page when JavaScript changes", async () => {
     const dir = await makeFixture({
       "index.html":

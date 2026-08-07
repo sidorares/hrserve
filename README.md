@@ -94,7 +94,7 @@ window.addEventListener("script-patch", (event) => {
 ## Supported File Types
 
 - **CSS**: Live updates via `CSS.setStyleSheetText` — no page reload (changes are validated first; invalid CSS is not applied)
-- **JavaScript**: A `script-patch` event is dispatched on the page. On Chromium versions that still support LiveEdit (removed upstream in 2025), the running script's body is also swapped via `Debugger.setScriptSource`
+- **JavaScript**: A `script-patch` event is dispatched on the page. On Chromium versions that still support LiveEdit ([removed in Chrome 145](https://developer.chrome.com/blog/devtools-deprecates-live-editing)), the running script's body is also swapped via `Debugger.setScriptSource`
 - **HTML**: Full DOM replacement via `DOM.setOuterHTML`
 - **Images**: Automatic image reload with cache busting (PNG, JPG, GIF, SVG, WebP) — covers `<img>`, `srcset`, `<picture>` sources, CSS `background-image` and friends, inline styles, SVG `<image>`, favicons, `<object>`/`<embed>` and `<input type="image">`
 
