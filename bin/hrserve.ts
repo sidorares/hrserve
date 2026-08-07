@@ -2,8 +2,8 @@
 
 import { chromium } from "playwright";
 import yargs from "yargs";
-import { hideBin } from "yargs/helpers";
 import type { ArgumentsCamelCase, Argv } from "yargs";
+import { hideBin } from "yargs/helpers";
 
 import { createServer } from "../lib/hrserve";
 
@@ -26,7 +26,8 @@ yargs(hideBin(process.argv))
     async (argv: ArgumentsCamelCase<CLIArgs>) => {
       const browser = await chromium.launch({
         headless: false,
-        devtools: argv.devtools,
+        // The `devtools` launch option was removed in newer Playwright versions
+        args: argv.devtools ? ["--auto-open-devtools-for-tabs"] : [],
       });
 
       const server = createServer(browser);
@@ -41,7 +42,7 @@ yargs(hideBin(process.argv))
         dir: argv.dir || process.cwd(),
         width: argv.width,
         height: argv.height,
-        devtools: argv.devtools,
+        verbose: argv.verbose,
       });
     }
   )

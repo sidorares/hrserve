@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-"target": "es6",
+    "target": "es6",
     "module": "commonjs",
     "moduleResolution": "node",
     "outDir": "./dist",
@@ -15,15 +15,8 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "noEmitOnError": true,
-    "preserveWatchOutput": true,
+    "preserveWatchOutput": true
   },
-  "include": [
-    "bin/**/*",
-    "lib/**/*"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "tmp"
-  ]
-} 
+  "include": ["bin/**/*", "lib/**/*"],
+  "exclude": ["node_modules", "dist", "tmp"]
+}

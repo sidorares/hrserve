@@ -1,39 +1,47 @@
-import serveHandler from "serve-handler";
-import type { Route } from "playwright";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { EventEmitter } from "node:events";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Route } from "playwright";
+import serveHandler from "serve-handler";
 
 /**
- * Serves directory listings using serve-handler with Playwright routes
+ * Serves directory listings and 404 pages using serve-handler with Playwright routes
  * @param directory - The directory path to serve
  * @param route - The Playwright route to fulfill
- * @param fileName - The file name/path to use as the request URL
- * @returns Promise<void> - Resolves when the serve-handler response stream is finished
+ * @param urlPath - The request URL path (relative to the served root, e.g. "/sub/")
+ * @returns Promise<void> - Resolves when the serve-handler response has been fulfilled
  */
-export async function serveDirectoryListing(directory: string, route: Route, fileName: string): Promise<void> {
-  console.log("serveDirectoryListing", directory, fileName);
+export async function serveDirectoryListing(
+  directory: string,
+  route: Route,
+  urlPath: string
+): Promise<void> {
   return new Promise((resolve, reject) => {
     // Create minimal mock request object
     const mockRequest = Object.assign(new EventEmitter(), {
-      url: fileName.startsWith("/") ? fileName : `/${fileName}`,
+      url: urlPath.startsWith("/") ? urlPath : `/${urlPath}`,
       method: "GET",
       headers: {},
     }) as IncomingMessage;
 
-    // Create response object that captures data
+    // Create response object that captures data.
+    // serve-handler both assigns `response.statusCode` directly and calls
+    // writeHead(), and mixes setHeader() with writeHead() headers, so the mock
+    // has to keep a real statusCode property and merge (not replace) headers.
     const chunks: Buffer[] = [];
-    let statusCode = 200;
-    let headers: Record<string, string> = {};
+    const headers: Record<string, string> = {};
 
     const mockResponse = Object.assign(new EventEmitter(), {
+      statusCode: 200,
       writeHead(code: number, responseHeaders?: Record<string, string>) {
-        statusCode = code;
-        if (responseHeaders) {
-          headers = { ...responseHeaders };
+        mockResponse.statusCode = code;
+        for (const [name, value] of Object.entries(responseHeaders ?? {})) {
+          headers[name.toLowerCase()] = String(value);
         }
+        return mockResponse;
       },
       setHeader(name: string, value: string) {
-        headers[name.toLowerCase()] = value;
+        headers[name.toLowerCase()] = String(value);
+        return mockResponse;
       },
       write(chunk: Buffer | string) {
         if (chunk) {
@@ -50,14 +58,14 @@ export async function serveDirectoryListing(directory: string, route: Route, fil
 
         route
           .fulfill({
-            status: statusCode,
+            status: mockResponse.statusCode,
             headers,
             body,
           })
           .then(resolve)
           .catch(reject);
       },
-    }) as ServerResponse;
+    }) as unknown as ServerResponse;
 
     // Configure serve-handler for directory listing
     const config = {
