@@ -23,6 +23,7 @@ Options:
 - `--verbose, -v`: Run with verbose logging
 - `--width, -w`: Width of the browser window
 - `--height, -h`: Height of the browser window
+- `--script-reload`: How to apply changed JavaScript — `auto` (default), `evaluate`, `import` or `off` (see [JavaScript hot reload](#javascript-hot-reload))
 
 ## Programmatic Usage
 
@@ -73,6 +74,7 @@ Starts serving files and watching for changes. Resolves with the Playwright `Pag
 - `options.url`: The base URL to serve
 - `options.dir`: Directory to serve files from (optional when every rule sets its own `dir`)
 - `options.rules`: Ordered routing rules — see [Routing rules](#routing-rules)
+- `options.scriptReload`: How changed JavaScript is applied — see [JavaScript hot reload](#javascript-hot-reload) (default: `"auto"`)
 - `options.width`: Browser window width (default: 1280)
 - `options.height`: Browser window height (default: 720)
 - `options.profile`: Name of a saved [profile](#session-profiles) to start from (default: a fresh session)
@@ -91,7 +93,7 @@ Stops watching files. Does not close the browser — the caller owns it.
 Listen for server events.
 
 **Events:**
-- `'patch'`: Emitted once per file change. Handler receives `{ fileName, url, mimeType, applied, reason }`. `applied: false` means the change was seen but deliberately *not* put into the page — `reason` says why (`css-invalid`, `stylesheet-not-loaded`, `live-edit-unavailable`, …)
+- `'patch'`: Emitted once per file change. Handler receives `{ fileName, url, mimeType, applied, reason }`. `applied: false` means the change was seen but not put into the page — `reason` says why (`css-invalid`, `stylesheet-not-loaded`, `hot-update-threw`, `cancelled-by-page`, …)
 - `'request'`: Emitted for every intercepted request, with `{ url, method, kind }` where `kind` is the routing decision (`file`, `mock`, `proxy`, `pass`, `fallback`, …)
 - `'new-resource'`: Emitted when a served file starts being watched. Handler receives `{ url, mimeType }`
 
@@ -222,7 +224,7 @@ Register it with an MCP-capable agent and it can serve a worktree and then *veri
 | `page_screenshot` | "what does it look like now?" |
 | `page_console` | "did my change break anything?" (console + uncaught errors) |
 | `page_network` | "why did that request return that?" — each entry labelled `served-local`, `mocked`, `proxied`, `upstream` or `blocked` |
-| `patch_history` | "did my edit reach the page?" — with `applied` and, when false, the reason (invalid CSS, stylesheet not loaded, LiveEdit unavailable) |
+| `patch_history` | "did my edit reach the page?" — with `applied` and, when false, the reason (invalid CSS, stylesheet not loaded, the new script source threw) |
 | `wait_for_patch` | block until the next patch lands, instead of polling |
 | `page_dom` | text or HTML snapshot for non-visual assertions |
 | `page_eval` | run an expression in the page |
@@ -230,15 +232,47 @@ Register it with an MCP-capable agent and it can serve a worktree and then *veri
 
 ⚠️ **Trust model:** `page_eval` runs arbitrary JavaScript in the page and mock handlers are ordinary modules executed in this process, so an MCP client with access to this server can run code on your machine. Only connect clients you would already trust with a shell.
 
-### In-page events
+## JavaScript hot reload
 
-When a watched JavaScript file changes, hrserve dispatches a `script-patch` `CustomEvent` on `window` so page code can react (e.g. re-run initialization):
+Chromium removed LiveEdit in Chrome 145 ([announcement](https://developer.chrome.com/blog/devtools-deprecates-live-editing)), so a running script's body can no longer be swapped in place. hrserve instead **re-runs the new source**, picking the mechanism from how the browser parsed the file:
+
+| File | Mechanism | Effect |
+|------|-----------|--------|
+| classic `<script>` | indirect `eval` in global scope | `var`, `function` and `window.*` assignments are replaced |
+| `<script type="module">` | `import()` of a cache-busted URL | the module re-executes; its dependencies stay cached |
+
+Top-level side effects therefore **run again**, exactly as in classic module-replacement HMR. The `script-patch` event fires *before* the new source runs, so page code can dispose of the old version first:
 
 ```javascript
 window.addEventListener("script-patch", (event) => {
-  console.log("changed:", event.detail.scriptUrl);
+  const { scriptUrl, mode } = event.detail;
+
+  teardown();                     // remove listeners, cancel timers, unmount
+
+  // Optional: receive the result of the re-run — the module namespace in
+  // "import" mode, the script's completion value in "evaluate" mode.
+  event.detail.accept((exports) => render(exports.App));
+
+  // Optional: handle the update entirely yourself and stop hrserve re-running it.
+  // event.preventDefault();
+});
+
+// Fires when the new source (or an accept handler) throws. The old version is
+// still the one running.
+window.addEventListener("script-patch-error", (event) => {
+  console.warn(event.detail.scriptUrl, event.detail.message);
 });
 ```
+
+`event.detail.mode` is `"evaluate"`, `"import"`, or `"none"` when hrserve will not run anything — because `scriptReload` is `"off"`, or because the browser never reported the file as a script (a worker entry point, say). The event is dispatched in all three cases, so it remains a reliable "this file changed" signal.
+
+Set `scriptReload` on `serve()` to override the mechanism: `"auto"` (default), `"evaluate"`, `"import"`, or `"off"` to only dispatch the event.
+
+**Limitations.** Re-running is not a substitute for a module-graph-aware HMR runtime:
+
+- ES module bindings are fixed at link time, so modules that already imported the changed one keep the **old** values. Only the fresh namespace passed to `accept()` sees the new ones. Re-import is most useful for leaf modules and entry points.
+- A top-level `const`/`let` in a classic script keeps its own scope on re-run (this is what lets the file re-run at all), so other scripts still see the original value. Use `window.*` or `var` for values that must be shared.
+- Re-running duplicates side effects that are not cleaned up in `script-patch` — repeated event listeners, remounted components, and `customElements.define` throwing on a second call.
 
 ## Session profiles
 
@@ -286,7 +320,7 @@ A profile carries what `storageState` carries. It does **not** capture sessionSt
 ## Supported File Types
 
 - **CSS**: Live updates via `CSS.setStyleSheetText` — no page reload (changes are validated first; invalid CSS is not applied)
-- **JavaScript**: A `script-patch` event is dispatched on the page. On Chromium versions that still support LiveEdit ([removed in Chrome 145](https://developer.chrome.com/blog/devtools-deprecates-live-editing)), the running script's body is also swapped via `Debugger.setScriptSource`
+- **JavaScript**: The new source is re-run or re-imported, with `script-patch` as the cleanup hook — see [JavaScript hot reload](#javascript-hot-reload)
 - **HTML**: Full DOM replacement via `DOM.setOuterHTML`
 - **Images**: Automatic image reload with cache busting (PNG, JPG, GIF, SVG, WebP) — covers `<img>`, `srcset`, `<picture>` sources, CSS `background-image` and friends, inline styles, SVG `<image>`, favicons, `<object>`/`<embed>` and `<input type="image">`
 

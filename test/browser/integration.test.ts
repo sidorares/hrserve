@@ -49,6 +49,14 @@ async function waitFor<T>(
 /** Give chokidar a moment to establish its watch before we modify the file. */
 const watcherSettle = () => new Promise((resolve) => setTimeout(resolve, 500));
 
+/**
+ * Space out consecutive writes to the same file. chokidar (as configured, with
+ * default options) drops every other change when writes land back to back —
+ * reproducible with plain chokidar, no hrserve involved — and a delay of about
+ * a second is enough to avoid it.
+ */
+const betweenWrites = () => new Promise((resolve) => setTimeout(resolve, 1200));
+
 before(async () => {
   browser = await chromium.launch({ headless: true });
 });
@@ -163,26 +171,64 @@ describe("hrserve integration", () => {
   });
 
   // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145
-  // (https://developer.chrome.com/blog/devtools-deprecates-live-editing), so
-  // the in-place body swap can no longer be asserted; the guaranteed contract
-  // is the script-patch event that lets page code react to the change.
-  it("dispatches script-patch on the page when JavaScript changes", async () => {
+  // (https://developer.chrome.com/blog/devtools-deprecates-live-editing), so the
+  // script body can no longer be swapped in place. Instead the new source is
+  // re-run (classic scripts) or re-imported (ES modules).
+  const CLASSIC_SCRIPT = (version: string) =>
+    [
+      // A top-level const is the interesting case: re-running the source at the
+      // top level of Runtime.evaluate throws "Identifier has already been
+      // declared", which is why the patcher uses indirect eval.
+      `const GREETING = "${version}";`,
+      `var appVersion = "${version}";`,
+      `window.getValue = function () { return "${version}"; };`,
+      "window.__runs = (window.__runs || 0) + 1;",
+    ].join("\n");
+
+  /** Register a script-patch listener that records what it saw, before re-running. */
+  const recordPatches = (page: Page) =>
+    page.evaluate(() => {
+      const w = window as unknown as {
+        __patched: { scriptUrl: string; mode: string; valueAtDispatch: unknown }[];
+        __errors: string[];
+        getValue?(): string;
+      };
+      w.__patched = [];
+      w.__errors = [];
+      window.addEventListener("script-patch", (event) => {
+        const { scriptUrl, mode } = (event as CustomEvent<{ scriptUrl: string; mode: string }>)
+          .detail;
+        w.__patched.push({ scriptUrl, mode, valueAtDispatch: w.getValue?.() });
+      });
+      window.addEventListener("script-patch-error", (event) => {
+        w.__errors.push((event as CustomEvent<{ message: string }>).detail.message);
+      });
+    });
+
+  const readPatches = (page: Page) =>
+    page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __patched: { scriptUrl: string; mode: string; valueAtDispatch: unknown }[];
+          }
+        ).__patched
+    );
+
+  it("re-runs a changed classic script in global scope", async () => {
     const dir = await makeFixture({
       "index.html":
         '<!DOCTYPE html><html><head><script src="app.js"></script></head>' +
         "<body><h1>js</h1></body></html>",
-      "app.js": 'window.getValue = function () { return "v1"; };\n',
+      "app.js": CLASSIC_SCRIPT("v1"),
     });
     const server = createServer(browser);
     let page: Page | undefined;
     try {
       page = await server.serve({ url: "http://js.hrserve.test/", dir });
+      await recordPatches(page);
       await page.evaluate(() => {
-        const w = window as unknown as { __patchedScripts: string[] };
-        w.__patchedScripts = [];
-        window.addEventListener("script-patch", (event) => {
-          w.__patchedScripts.push((event as CustomEvent<{ scriptUrl: string }>).detail.scriptUrl);
-        });
+        (window as unknown as { __noReloadMarker: number }).__noReloadMarker = 42;
       });
       assert.equal(
         await page.evaluate(() => (window as unknown as { getValue(): string }).getValue()),
@@ -191,24 +237,237 @@ describe("hrserve integration", () => {
 
       await watcherSettle();
       const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
-      await fs.writeFile(
-        path.join(dir, "app.js"),
-        'window.getValue = function () { return "v2"; };\n'
-      );
+      await fs.writeFile(path.join(dir, "app.js"), CLASSIC_SCRIPT("v2"));
       const [event] = await patched;
       assert.equal(event.url, "http://js.hrserve.test/app.js");
 
-      // The page is notified so it can re-run initialization
-      const notified = await waitFor(
+      // The new source ran: the function the page calls is the new one...
+      await waitFor(
+        () =>
+          (page as Page).evaluate(() => (window as unknown as { getValue(): string }).getValue()),
+        (value) => value === "v2"
+      );
+      // ...and a top-level `var` still reaches the global object, as in a
+      // classic script (indirect eval, not a scoped wrapper).
+      assert.equal(
+        await page.evaluate(() => (globalThis as unknown as { appVersion: string }).appVersion),
+        "v2"
+      );
+
+      // Top-level side effects re-run — hence the cleanup event below.
+      assert.equal(await page.evaluate(() => (window as unknown as { __runs: number }).__runs), 2);
+
+      // script-patch fires *before* the new source runs, so a listener can
+      // dispose of the old one while it is still the live version.
+      assert.deepEqual(await readPatches(page), [
+        { scriptUrl: "http://js.hrserve.test/app.js", mode: "evaluate", valueAtDispatch: "v1" },
+      ]);
+
+      // The page was patched, not reloaded
+      assert.equal(
+        await page.evaluate(
+          () => (window as unknown as { __noReloadMarker: number }).__noReloadMarker
+        ),
+        42
+      );
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-imports a changed ES module and hands the new namespace to accept()", async () => {
+    const dir = await makeFixture({
+      "index.html":
+        '<!DOCTYPE html><html><head><script type="module" src="app.js"></script></head>' +
+        "<body><h1>esm</h1></body></html>",
+      "app.js": 'export const label = "v1";\nwindow.__loaded = true;\n',
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://esm.hrserve.test/", dir });
+      await page.waitForFunction(() => (window as unknown as { __loaded?: boolean }).__loaded);
+      await recordPatches(page);
+      await page.evaluate(() => {
+        window.addEventListener("script-patch", (event) => {
+          const detail = (
+            event as CustomEvent<{ accept(handler: (exports: unknown) => void): void }>
+          ).detail;
+          detail.accept((exports) => {
+            (window as unknown as { __accepted: unknown }).__accepted = (
+              exports as { label: string }
+            ).label;
+          });
+        });
+      });
+
+      await watcherSettle();
+      const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(path.join(dir, "app.js"), 'export const label = "v2";\n');
+      await patched;
+
+      // The accept handler receives the freshly evaluated module namespace
+      const accepted = await waitFor(
         () =>
           (page as Page).evaluate(
-            () => (window as unknown as { __patchedScripts: string[] }).__patchedScripts
+            () => (window as unknown as { __accepted?: string }).__accepted ?? null
           ),
-        (urls) => urls.length > 0
+        (value) => value !== null
       );
-      assert.deepEqual(notified, ["http://js.hrserve.test/app.js"]);
+      assert.equal(accepted, "v2");
+      assert.deepEqual(
+        (await readPatches(page)).map(({ mode }) => mode),
+        ["import"]
+      );
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 
-      // The page kept running (not reloaded); the original function is intact
+  it("does not re-import the same module twice per change", async () => {
+    // The re-import request goes through route interception like any other, so
+    // watching its cache-busted URL as well would double the patch events —
+    // and double them again on every subsequent edit.
+    const dir = await makeFixture({
+      "index.html":
+        '<!DOCTYPE html><html><head><script type="module" src="app.js"></script></head>' +
+        "<body><h1>esm</h1></body></html>",
+      "app.js": 'export const label = "v1";\nwindow.__loaded = true;\n',
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://esm-once.hrserve.test/", dir });
+      await page.waitForFunction(() => (window as unknown as { __loaded?: boolean }).__loaded);
+      const events: string[] = [];
+      server.on("patch", ({ url }) => events.push(url as string));
+
+      await watcherSettle();
+      for (const version of ["v2", "v3"]) {
+        const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+        await fs.writeFile(path.join(dir, "app.js"), `export const label = "${version}";\n`);
+        await patched;
+        await betweenWrites();
+      }
+      // allow any duplicate watcher a chance to fire
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      assert.deepEqual(events, [
+        "http://esm-once.hrserve.test/app.js",
+        "http://esm-once.hrserve.test/app.js",
+      ]);
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets the page take over the update with preventDefault()", async () => {
+    const dir = await makeFixture({
+      "index.html":
+        '<!DOCTYPE html><html><head><script src="app.js"></script></head>' +
+        "<body><h1>js</h1></body></html>",
+      "app.js": CLASSIC_SCRIPT("v1"),
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://cancel.hrserve.test/", dir });
+      await recordPatches(page);
+      await page.evaluate(() => {
+        window.addEventListener("script-patch", (event) => event.preventDefault());
+      });
+
+      await watcherSettle();
+      const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(path.join(dir, "app.js"), CLASSIC_SCRIPT("v2"));
+      await patched;
+
+      // The page was notified but the new source never ran
+      await waitFor(
+        () => readPatches(page as Page),
+        (seen) => seen.length > 0
+      );
+      assert.equal(
+        await page.evaluate(() => (window as unknown as { getValue(): string }).getValue()),
+        "v1"
+      );
+      assert.equal(await page.evaluate(() => (window as unknown as { __runs: number }).__runs), 1);
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a broken update without taking the page down", async () => {
+    const dir = await makeFixture({
+      "index.html":
+        '<!DOCTYPE html><html><head><script src="app.js"></script></head>' +
+        "<body><h1>js</h1></body></html>",
+      "app.js": CLASSIC_SCRIPT("v1"),
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://broken.hrserve.test/", dir });
+      await recordPatches(page);
+
+      await watcherSettle();
+      const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(path.join(dir, "app.js"), "this is not valid javascript(");
+      await patched;
+
+      const errors = await waitFor(
+        () => (page as Page).evaluate(() => (window as unknown as { __errors: string[] }).__errors),
+        (seen) => seen.length > 0
+      );
+      assert.equal(errors.length, 1);
+      assert.match(errors[0], /Unexpected|Invalid|SyntaxError/i);
+
+      // The old version is still running
+      assert.equal(
+        await page.evaluate(() => (window as unknown as { getValue(): string }).getValue()),
+        "v1"
+      );
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('only notifies the page when scriptReload is "off"', async () => {
+    const dir = await makeFixture({
+      "index.html":
+        '<!DOCTYPE html><html><head><script src="app.js"></script></head>' +
+        "<body><h1>js</h1></body></html>",
+      "app.js": CLASSIC_SCRIPT("v1"),
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://noreload.hrserve.test/", dir, scriptReload: "off" });
+      await recordPatches(page);
+
+      await watcherSettle();
+      const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(path.join(dir, "app.js"), CLASSIC_SCRIPT("v2"));
+      await patched;
+
+      const seen = await waitFor(
+        () => readPatches(page as Page),
+        (patches) => patches.length > 0
+      );
+      assert.deepEqual(
+        seen.map(({ mode }) => mode),
+        ["none"]
+      );
       assert.equal(
         await page.evaluate(() => (window as unknown as { getValue(): string }).getValue()),
         "v1"
@@ -246,7 +505,7 @@ describe("hrserve integration", () => {
       const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
       await fs.writeFile(path.join(dir, "lib.js"), 'export const value = "v2";\n');
       const [event] = await patched;
-      assert.equal(event.applied, false, "no scriptId means the source cannot be swapped");
+      assert.equal(event.applied, false, "without scriptParsed we cannot tell how to re-run it");
       assert.match(event.reason ?? "", /script-patch event dispatched/);
 
       const notified = await waitFor(

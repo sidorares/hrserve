@@ -242,7 +242,7 @@ export function createMcpServer(manager: SessionManager): McpServer {
       title: "Read patch history",
       description:
         "Files patched into the running page, each with whether it was actually applied and why " +
-        "not (invalid CSS, stylesheet not loaded, LiveEdit unavailable).",
+        "not (invalid CSS, stylesheet not loaded, the new script source threw).",
       inputSchema: {
         name: nameArg,
         limit: z.number().optional().describe("Most recent N entries (default 50)"),
