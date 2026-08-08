@@ -78,6 +78,7 @@ Starts serving files and watching for changes. Resolves with the Playwright `Pag
 - `options.width`: Browser window width (default: 1280)
 - `options.height`: Browser window height (default: 720)
 - `options.profile`: Name of a saved [profile](#session-profiles) to start from (default: a fresh session)
+- `options.watch`: How long a file must stop changing before hrserve reacts — `{ stabilityThreshold, pollInterval }` in ms (default: `{ stabilityThreshold: 50, pollInterval: 10 }`). Applies to served files and mock handlers alike. Raise it for a network filesystem or an editor that saves in several visible steps; the threshold is added to the latency of every patch
 - `options.verbose`: Log request routing and CDP events (default: false)
 
 #### `server.saveProfile(name)`
