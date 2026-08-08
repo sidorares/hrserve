@@ -7,14 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": [
-      "node_modules",
-      "dist",
-      "build",
-      "coverage",
-      "*.min.js",
-      "*.bundle.js"
-    ]
+    "ignore": ["node_modules", "dist", "build", "coverage", "*.min.js", "*.bundle.js"]
   },
   "formatter": {
     "enabled": true,
@@ -56,4 +49,4 @@
       "indentWidth": 2
     }
   }
-} 
+}

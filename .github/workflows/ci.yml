@@ -1,0 +1,44 @@
+name: '🧪 CI — Test'
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: Lint, Build & Test
+    steps:
+      - name: ➕ Actions - Checkout
+        uses: actions/checkout@v4
+
+      - name: ➕ Actions - Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: 📦 Installing Dependencies
+        run: npm ci
+
+      - name: 🔍 Lint
+        run: npm run lint
+
+      - name: 🔨 Build
+        run: npm run build
+
+      - name: 🧪 Unit Tests
+        run: npm run test:unit
+
+      - name: ➕ Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: 🌐 Browser Tests
+        run: npm run test:browser

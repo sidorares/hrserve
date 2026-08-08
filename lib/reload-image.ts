@@ -16,6 +16,10 @@ interface ImageReloadResult {
 }
 
 export async function reloadImage(page: Page, targetUrl: string): Promise<ImageReloadResult> {
+  // esbuild-based TS runners (tsx) transpile this file with keepNames, which
+  // injects `__name(...)` helper calls into the function page.evaluate
+  // serializes into the browser; provide a no-op shim so it can run there.
+  await page.evaluate("void (globalThis.__name = globalThis.__name || ((fn) => fn))");
   return await page.evaluate(function triggerUpdate(targetUrl) {
     const timestamp = Date.now();
     let updatedCount = 0;
@@ -55,21 +59,21 @@ export async function reloadImage(page: Page, targetUrl: string): Promise<ImageR
         for (const rule of rules) {
           if ((rule as CSSStyleRule).style) {
             const styleRule = rule as CSSStyleRule;
-            // Check all properties that might contain URLs
+            // Check all properties that might contain URLs.
+            // getPropertyValue/setProperty only understand hyphenated CSS names
+            // (camelCase like "backgroundImage" is silently ignored).
             const urlProperties = [
-              "backgroundImage",
-              "listStyleImage",
+              "background-image",
+              "list-style-image",
               "content",
               "cursor",
-              "borderImageSource",
-              "maskImage",
-              "webkitMaskImage",
+              "border-image-source",
+              "mask-image",
+              "-webkit-mask-image",
             ] as const;
 
             for (const prop of urlProperties) {
-              const value =
-                styleRule.style.getPropertyValue(prop) ||
-                (styleRule.style as unknown as Record<string, string>)[prop];
+              const value = styleRule.style.getPropertyValue(prop);
               if (value?.includes("url(")) {
                 // Extract and check URLs
                 const urlRegex = /url\(['"]?([^'")]+)['"]?\)/g;
@@ -106,18 +110,17 @@ export async function reloadImage(page: Page, targetUrl: string): Promise<ImageR
     for (const element of elementsWithStyle) {
       const style = element.style;
       const urlProperties = [
-        "backgroundImage",
-        "listStyleImage",
+        "background-image",
+        "list-style-image",
         "content",
         "cursor",
-        "borderImageSource",
-        "maskImage",
-        "webkitMaskImage",
+        "border-image-source",
+        "mask-image",
+        "-webkit-mask-image",
       ] as const;
 
       for (const prop of urlProperties) {
-        const value =
-          style.getPropertyValue(prop) || (style as unknown as Record<string, string>)[prop];
+        const value = style.getPropertyValue(prop);
         if (value?.includes("url(")) {
           const urlRegex = /url\(['"]?([^'")]+)['"]?\)/g;
           let match = urlRegex.exec(value);

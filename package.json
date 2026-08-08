@@ -1,6 +1,7 @@
 {
   "version": "1.1.0",
   "name": "hrserve",
+  "license": "MIT",
   "author": {
     "name": "Andrey Sidorov",
     "email": "andrey.sidorov@gmail.com"
@@ -18,6 +19,11 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "dev:ts": "tsx bin/hrserve.ts",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "npm run test:unit && npm run test:browser",
+    "test:unit": "node --import tsx --test \"test/unit/*.test.ts\"",
+    "test:browser": "node --import tsx --test \"test/browser/*.test.ts\"",
     "prepublishOnly": "npm run build",
     "clean": "rm -rf dist"
   },
@@ -25,7 +31,7 @@
     "chokidar": "^3.6.0",
     "csstree-validator": "^3.0.0",
     "mime-types": "^2.1.35",
-    "playwright": "^1.52.0",
+    "playwright": "^1.62.1",
     "serve-handler": "^6.1.6",
     "yargs": "^17.7.2"
   },
@@ -41,10 +47,9 @@
     "live module updating",
     "live module reloading"
   ],
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "devDependencies": {
+    "@biomejs/biome": "1.9.4",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^22.10.2",
     "@types/serve-handler": "^6.1.4",
