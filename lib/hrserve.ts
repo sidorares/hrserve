@@ -3,13 +3,19 @@ import fs from "node:fs/promises";
 import chokidar from "chokidar";
 import { validate } from "csstree-validator";
 import type { Browser, BrowserContext, CDPSession, Page, Request, Route } from "playwright";
+import { MockRouter } from "./mock-router";
 import { ProfileStore, type ProfileSummary, profileCoversUrl } from "./profiles";
 import { IMAGE_MIME_TYPES, reloadImage } from "./reload-image";
-import { type ResolveConfig, normalizeBaseUrl, resolveRequest } from "./resolve-request";
+import {
+  type ResolveConfig,
+  type ResolvedRequest,
+  normalizeBaseUrl,
+  resolveRequest,
+} from "./resolve-request";
 import { type Rule, normalizeRules } from "./rules";
 import { serveDirectoryListing } from "./serve-directory";
 
-export type { Rule, ServeRule, UpstreamRule, ProxyRule } from "./rules";
+export type { Rule, ServeRule, UpstreamRule, ProxyRule, MockRule } from "./rules";
 export {
   ProfileStore,
   defaultProfilesDir,
@@ -41,13 +47,31 @@ interface ServeOptions {
   /** Log request routing and CDP events. */
   verbose?: boolean;
   /**
+   * Called once the page exists and request interception is installed, but
+   * *before* the initial navigation — the only place to attach listeners that
+   * must not miss the first load's console output and requests. May be async;
+   * the returned value is awaited.
+   */
+  onPage?: (page: Page) => unknown;
+  /**
    * @deprecated Has no effect: devtools can only be enabled when launching the
    * browser, e.g. `chromium.launch({ devtools: true })`.
    */
   devtools?: boolean;
 }
 
-interface PatchEvent {
+/**
+ * What actually happened to the page. `applied: false` means the change was
+ * detected but not put into the page (invalid CSS, unknown stylesheet, a
+ * browser without LiveEdit) — the distinction matters to anyone, human or
+ * agent, asking "did my edit reach the page?".
+ */
+export interface PatchOutcome {
+  applied: boolean;
+  reason?: string;
+}
+
+interface PatchEvent extends PatchOutcome {
   fileName: string;
   url?: string;
   mimeType: string;
@@ -56,6 +80,13 @@ interface PatchEvent {
 interface NewResourceEvent {
   url: string;
   mimeType: string;
+}
+
+/** How a single request was answered. */
+export interface RequestEvent {
+  url: string;
+  method: string;
+  kind: ResolvedRequest["kind"];
 }
 
 interface HRServer extends EventEmitter {
@@ -71,8 +102,10 @@ interface HRServer extends EventEmitter {
   close(): Promise<void>;
   on(event: "patch", listener: (data: PatchEvent) => void): this;
   on(event: "new-resource", listener: (data: NewResourceEvent) => void): this;
+  on(event: "request", listener: (data: RequestEvent) => void): this;
   emit(event: "patch", data: PatchEvent): boolean;
   emit(event: "new-resource", data: NewResourceEvent): boolean;
+  emit(event: "request", data: RequestEvent): boolean;
 }
 
 interface PatchContext {
@@ -88,7 +121,7 @@ type PatcherFunction = (
   url: string,
   newContent?: string,
   fileName?: string
-) => Promise<void>;
+) => Promise<PatchOutcome>;
 
 interface ScriptDetails {
   scriptId: string;
@@ -104,6 +137,7 @@ export interface ServerOptions {
 export function createServer(browser: Browser, options: ServerOptions = {}): HRServer {
   const server = new EventEmitter() as HRServer;
   const watchers = new Map<string, chokidar.FSWatcher>();
+  const mockRouters: MockRouter[] = [];
   const patchers = new Map<string, PatcherFunction>();
   const scriptUrlToDetails = new Map<string, ScriptDetails>();
   const stylesheetUrlToId = new Map<string, string>();
@@ -115,60 +149,80 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
 
   // Setup patchers for different MIME types
   patchers.set("text/css", async ({ cdp }, url, newContent, fileName) => {
-    if (!newContent || !fileName) return;
+    if (!newContent || !fileName) return { applied: false, reason: "empty-content" };
 
     const validationResult = validate(newContent, fileName);
     // TODO: config / cli option to allow patching invalid css
     if (validationResult.length) {
       console.warn("CSS validation failed:", validationResult);
-      return;
+      return {
+        applied: false,
+        reason: `css-invalid: ${validationResult[0]?.message ?? ""}`.trim(),
+      };
     }
     const styleSheetId = stylesheetUrlToId.get(url);
     if (!styleSheetId) {
       log("no known stylesheet for", url);
-      return;
+      return { applied: false, reason: "stylesheet-not-loaded" };
     }
     try {
       await cdp.send("CSS.setStyleSheetText", {
         styleSheetId,
         text: newContent,
       });
+      return { applied: true };
     } catch (e) {
       console.warn("Error setting stylesheet text", e);
+      return { applied: false, reason: `cdp-error: ${(e as Error).message}` };
     }
   });
 
   for (const mimeType of IMAGE_MIME_TYPES) {
     patchers.set(mimeType, async ({ page }, url) => {
-      await reloadImage(page, url);
+      const result = await reloadImage(page, url);
+      return result.updatedCount > 0
+        ? { applied: true }
+        : { applied: false, reason: "no-references-to-image-on-page" };
     });
   }
 
   let liveEditUnavailableWarned = false;
   const patchScript: PatcherFunction = async ({ cdp }, url, scriptSource) => {
-    if (!scriptSource) return;
+    if (!scriptSource) return { applied: false, reason: "empty-content" };
 
+    let sourceSwapped = false;
+    let reason = "";
+
+    // Swapping the running source is best effort, but the script-patch event
+    // below is a documented contract and must fire on every change — including
+    // when Debugger.scriptParsed never told us about this URL (which happens
+    // for scripts the debugger did not register, e.g. under load or when the
+    // Debugger domain is unavailable).
     const scriptDetails = scriptUrlToDetails.get(url);
     if (!scriptDetails) {
       log("no known script for", url);
-      return;
-    }
-    try {
-      const result = await cdp.send("Debugger.setScriptSource", {
-        scriptId: scriptDetails.scriptId,
-        scriptSource,
-        allowTopFrameEditing: true,
-      });
-      if (result.status !== "Ok") {
-        console.warn("Failed to patch script", result);
-      }
-    } catch (e) {
-      // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145:
-      // https://developer.chrome.com/blog/devtools-deprecates-live-editing
-      // The script-patch event below is the reliable way for pages to react.
-      if (!liveEditUnavailableWarned) {
-        liveEditUnavailableWarned = true;
-        console.warn("Live script patching unavailable in this browser:", (e as Error).message);
+      reason = "script-not-registered-by-debugger";
+    } else {
+      try {
+        const result = await cdp.send("Debugger.setScriptSource", {
+          scriptId: scriptDetails.scriptId,
+          scriptSource,
+          allowTopFrameEditing: true,
+        });
+        sourceSwapped = result.status === "Ok";
+        if (!sourceSwapped) {
+          console.warn("Failed to patch script", result);
+          reason = `live-edit-rejected: ${result.status}`;
+        }
+      } catch (e) {
+        // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145:
+        // https://developer.chrome.com/blog/devtools-deprecates-live-editing
+        // The script-patch event below is the reliable way for pages to react.
+        if (!liveEditUnavailableWarned) {
+          liveEditUnavailableWarned = true;
+          console.warn("Live script patching unavailable in this browser:", (e as Error).message);
+        }
+        reason = "live-edit-unavailable";
       }
     }
 
@@ -177,13 +231,19 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
     await cdp.send("Runtime.evaluate", {
       expression: `window.dispatchEvent(new CustomEvent('script-patch', ${detail}))`,
     });
+
+    // Without LiveEdit the page was told about the change but the running
+    // script is unchanged; say so rather than claiming a successful patch.
+    return sourceSwapped
+      ? { applied: true }
+      : { applied: false, reason: `${reason}; script-patch event dispatched` };
   };
   // mime-db has historically flip-flopped between the two names for .js
   patchers.set("application/javascript", patchScript);
   patchers.set("text/javascript", patchScript);
 
   patchers.set("text/html", async ({ cdp }, _url, newContent) => {
-    if (!newContent) return;
+    if (!newContent) return { applied: false, reason: "empty-content" };
 
     const {
       root: { nodeId: rootNodeId },
@@ -192,6 +252,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
       nodeId: rootNodeId,
       outerHTML: newContent,
     });
+    return { applied: true };
   });
 
   // Main server functionality
@@ -205,6 +266,15 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
       baseUrl: normalizeBaseUrl(targetUrl),
       rules: normalizeRules(rules, dir),
     };
+
+    // Mock rules need their route directory scanned (and watched) before serving
+    for (const rule of routeConfig.rules) {
+      if (rule.action !== "mock") continue;
+      const router = new MockRouter({ dir: rule.dir as string, log });
+      await router.start();
+      rule.router = router;
+      mockRouters.push(router);
+    }
 
     const profile = options.profile ? await profiles.load(options.profile) : undefined;
     if (profile && !profileCoversUrl(profile, targetUrl)) {
@@ -288,6 +358,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
       const url = request.url();
       const resolved = await resolveRequest(routeConfig, url, request.method());
       log("request", request.method(), url, "->", resolved.kind);
+      server.emit("request", { url, method: request.method(), kind: resolved.kind });
 
       switch (resolved.kind) {
         case "pass":
@@ -303,6 +374,28 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
           } catch (e) {
             console.warn("Proxy request failed", resolved.target, e);
             return route.fulfill({ status: 502, body: "hrserve: proxy request failed" });
+          }
+        }
+        case "mock": {
+          try {
+            const result = await resolved.router.handle(resolved.match, {
+              url,
+              method: request.method(),
+              headers: await request.allHeaders(),
+              body: request.postDataBuffer() ?? undefined,
+            });
+            return await route.fulfill({
+              status: result.status,
+              headers: result.headers,
+              body: result.body,
+            });
+          } catch (e) {
+            console.warn("Mock handler failed", resolved.match.route.filePath, e);
+            return route.fulfill({
+              status: 500,
+              headers: { "content-type": "text/plain" },
+              body: `hrserve mock handler failed: ${(e as Error).message}`,
+            });
           }
         }
         case "forbidden":
@@ -329,19 +422,38 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
             watcher.on("change", async () => {
               try {
                 const newContent = await fs.readFile(filePath, "utf-8");
-                await patcher({ page, cdp }, url, newContent, filePath);
-                server.emit("patch", { fileName: filePath, url, mimeType });
+                const outcome = await patcher({ page, cdp }, url, newContent, filePath);
+                server.emit("patch", {
+                  fileName: filePath,
+                  url,
+                  mimeType,
+                  applied: outcome.applied,
+                  reason: outcome.reason,
+                });
               } catch (e) {
                 console.warn("Failed to patch", filePath, e);
+                server.emit("patch", {
+                  fileName: filePath,
+                  url,
+                  mimeType,
+                  applied: false,
+                  reason: `error: ${(e as Error).message}`,
+                });
               }
             });
-            server.emit("new-resource", { url, mimeType });
             watchers.set(url, watcher);
+            // The response is already fulfilled, so waiting here costs the page
+            // nothing — but chokidar ignores anything that changes before it is
+            // ready, so without this an edit made moments after load is lost.
+            await new Promise<void>((resolve) => watcher.once("ready", () => resolve()));
+            server.emit("new-resource", { url, mimeType });
           }
           return;
         }
       }
     });
+
+    await options.onPage?.(page);
 
     await page.goto(targetUrl);
     return page;
@@ -360,6 +472,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
   server.close = async () => {
     const closing = [...watchers.values()].map((watcher) => watcher.close());
     watchers.clear();
+    closing.push(...mockRouters.splice(0).map((router) => router.close()));
     await Promise.all(closing);
   };
 
