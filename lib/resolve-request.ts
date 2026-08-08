@@ -1,18 +1,27 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import mime from "mime-types";
+import { type NormalizedRule, buildProxyTarget, matchRule } from "./rules";
 
 export type ResolvedRequest =
-  /** Request is not under the served base URL; let it through to the network. */
+  /** Not ours (outside the base URL, or no rule matched): let it hit the network. */
   | { kind: "pass" }
+  /** Send the request to another origin with a rewritten URL. */
+  | { kind: "proxy"; target: string }
   /** Request tried to escape the served directory (or has malformed encoding). */
   | { kind: "forbidden" }
   /** File exists but its MIME type is unknown. */
   | { kind: "unknown-type"; filePath: string }
   /** Missing file or directory without index.html; `urlPath` is the raw URL path
    * (relative to the base URL) to hand to serve-handler for a listing / 404 page. */
-  | { kind: "fallback"; urlPath: string }
+  | { kind: "fallback"; urlPath: string; dir: string }
   | { kind: "file"; filePath: string; mimeType: string };
+
+export interface ResolveConfig {
+  /** Base URL, normalized to end with "/". */
+  baseUrl: string;
+  rules: NormalizedRule[];
+}
 
 /** Ensure the base URL ends with "/" so prefix matching can't cross a path segment
  * (e.g. base "http://host/app" must not match "http://host/apple"). */
@@ -20,23 +29,26 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 }
 
+/** Methods for which serving a file from disk makes sense. */
+const FILE_METHODS = new Set(["GET", "HEAD"]);
+
 /**
- * Map a request URL onto the served directory.
+ * Map a request URL onto a routing decision.
  *
  * Matching compares origin and path segments via the URL parser rather than raw
  * string prefixes, so "http://localhost:3000" does not capture requests to
  * "http://localhost:30001" and query strings are ignored.
  */
 export async function resolveRequest(
-  dir: string,
-  baseUrl: string,
-  requestUrl: string
+  config: ResolveConfig,
+  requestUrl: string,
+  method = "GET"
 ): Promise<ResolvedRequest> {
   let requested: URL;
   let base: URL;
   try {
     requested = new URL(requestUrl);
-    base = new URL(normalizeBaseUrl(baseUrl));
+    base = new URL(normalizeBaseUrl(config.baseUrl));
   } catch {
     return { kind: "pass" };
   }
@@ -48,12 +60,38 @@ export async function resolveRequest(
     return { kind: "pass" };
   }
 
-  // Raw URL path relative to the base, with a leading "/" (what serve-handler expects).
+  // Raw URL path relative to the base, with a leading "/" (what rules match against
+  // and what serve-handler expects).
   const urlPath = requested.pathname.slice(basePath.length - 1) || "/";
+
+  const rule = matchRule(config.rules, urlPath, method);
+  if (!rule) {
+    return { kind: "pass" };
+  }
+
+  switch (rule.action) {
+    case "upstream":
+      return { kind: "pass" };
+
+    case "proxy":
+      return {
+        kind: "proxy",
+        target: buildProxyTarget(rule.target as string, urlPath, requested.search),
+      };
+
+    default:
+      break;
+  }
+
+  // action: "serve"
+  if (!FILE_METHODS.has(method.toUpperCase())) {
+    return { kind: "pass" };
+  }
+  const dir = rule.dir as string;
 
   let relativePath: string;
   try {
-    relativePath = decodeURIComponent(requested.pathname.slice(basePath.length));
+    relativePath = decodeURIComponent(urlPath.slice(1));
   } catch {
     return { kind: "forbidden" };
   }
@@ -69,7 +107,7 @@ export async function resolveRequest(
 
   const stat = await fs.stat(filePath).catch(() => null);
   if (!stat) {
-    return { kind: "fallback", urlPath };
+    return { kind: "fallback", urlPath, dir };
   }
 
   let finalPath = filePath;
@@ -77,7 +115,7 @@ export async function resolveRequest(
     const indexPath = path.join(filePath, "index.html");
     const indexStat = await fs.stat(indexPath).catch(() => null);
     if (!indexStat?.isFile()) {
-      return { kind: "fallback", urlPath };
+      return { kind: "fallback", urlPath, dir };
     }
     finalPath = indexPath;
   }
