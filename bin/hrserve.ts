@@ -5,7 +5,7 @@ import yargs from "yargs";
 import type { ArgumentsCamelCase, Argv } from "yargs";
 import { hideBin } from "yargs/helpers";
 
-import { createServer } from "../lib/hrserve";
+import { type Rule, createServer } from "../lib/hrserve";
 
 interface CLIArgs {
   dir?: string;
@@ -14,6 +14,9 @@ interface CLIArgs {
   height?: number;
   devtools: boolean;
   verbose?: boolean;
+  mockDir?: string;
+  mockPath?: string;
+  proxy?: string;
 }
 
 yargs(hideBin(process.argv))
@@ -37,9 +40,23 @@ yargs(hideBin(process.argv))
         console.log(`File patched: ${fileName} (${mimeType})`);
       });
 
+      // Mocks (and an optional proxy for everything they don't cover) take
+      // precedence over files; the catch-all keeps normal serving behaviour.
+      const rules: Rule[] = [];
+      if (argv.mockDir) {
+        rules.push({ match: argv.mockPath, action: "mock", dir: argv.mockDir });
+      }
+      if (argv.proxy) {
+        rules.push({ match: argv.mockPath, action: "proxy", target: argv.proxy });
+      }
+      if (rules.length) {
+        rules.push({ action: "serve" });
+      }
+
       await server.serve({
         url: argv.url,
         dir: argv.dir || process.cwd(),
+        rules: rules.length ? rules : undefined,
         width: argv.width,
         height: argv.height,
         verbose: argv.verbose,
@@ -50,6 +67,19 @@ yargs(hideBin(process.argv))
     describe: "Base url of the page",
     type: "string",
     default: "http://localhost:3000/",
+  })
+  .option("mock-dir", {
+    type: "string",
+    description: "Directory of file-based mock API routes (Next.js conventions), run in-process",
+  })
+  .option("mock-path", {
+    type: "string",
+    description: "Path glob handled by --mock-dir / --proxy",
+    default: "/api/**",
+  })
+  .option("proxy", {
+    type: "string",
+    description: "Send --mock-path requests without a mock route to this origin",
   })
   .option("devtools", {
     alias: "d",

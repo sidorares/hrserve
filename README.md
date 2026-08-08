@@ -12,6 +12,9 @@ npx hrserve [dir] --url http://localhost:3000/
 
 Options:
 - `--url`: Base URL of the page (default: `http://localhost:3000/`)
+- `--mock-dir`: Directory of file-based [mock API routes](#mock-api-routes), run in-process
+- `--mock-path`: Path glob handled by `--mock-dir` / `--proxy` (default: `/api/**`)
+- `--proxy`: Send `--mock-path` requests without a mock route to this origin
 - `--devtools, -d`: Run with devtools initially open
 - `--verbose, -v`: Run with verbose logging
 - `--width, -w`: Width of the browser window
@@ -107,7 +110,74 @@ await server.serve({
 - `upstream` — let the request through to the real network, untouched.
 - `proxy` — send the request to `target`, preserving path, query, method, headers and body. hrserve performs this request itself and returns the result as if it came from the page's own origin, **so the page is not subject to CORS**. A path prefix on the target is kept: target `https://example.com/v2` + request `/api/users` → `https://example.com/v2/api/users`. If the target is unreachable the page gets a 502.
 
+- `mock` — answer from file-based API routes executed **in this process** (see below). If no mock route matches the path, the request falls through to the **next** rule.
+
 Requests matching **no** rule go to the network, so a rule list without a `**` entry is an overlay rather than a full server.
+
+## Mock API routes
+
+Point a `mock` rule at a directory of route files and hrserve runs them in-process — no port, no spawned server, no framework:
+
+```bash
+npx hrserve ./public --url http://localhost:3000/ --mock-dir ./mocks --proxy https://staging-api.example.com
+```
+
+```javascript
+await server.serve({
+  url: "http://localhost:3000/",
+  dir: "./public",
+  rules: [
+    { match: "/api/**", action: "mock", dir: "./mocks" },
+    // anything the mocks don't cover reaches the real API
+    { match: "/api/**", action: "proxy", target: "https://staging-api.example.com" },
+    { match: "**", action: "serve" },
+  ],
+});
+```
+
+The directory mirrors the URL space, following **Next.js file conventions**, so you can point it at a `mocks/` folder *or* straight at a real Next app's `app/` or `pages/` directory:
+
+| File (relative to the mock dir) | URL |
+|---|---|
+| `api/users/route.ts` | `/api/users` |
+| `api/users/[id]/route.ts` | `/api/users/:id` |
+| `api/files/[...path]/route.ts` | `/api/files/*` (one or more segments) |
+| `api/docs/[[...slug]]/route.ts` | `/api/docs` and `/api/docs/*` |
+| `api/users.ts` (pages style) | `/api/users` |
+| `api/posts/index.ts` | `/api/posts` |
+
+Resolution follows Next's priority — static beats dynamic beats catch-all — so `/api/users` wins over `/api/[id]`. Route groups `(admin)` and parallel routes `@modal` don't affect the URL, and App Router UI files (`page`, `layout`, `loading`, …) plus `_`-prefixed files are ignored.
+
+**App Router style** — a `route.ts` exporting HTTP method functions, using Web `Request`/`Response`:
+
+```typescript
+const todos = [{ id: 1, title: "write tests" }];
+
+export function GET() {
+  return Response.json(todos);
+}
+
+export async function POST(request: Request) {
+  const { title } = await request.json();
+  const todo = { id: todos.length + 1, title };
+  todos.push(todo);                       // module state survives between requests
+  return Response.json(todo, { status: 201 });
+}
+
+// Dynamic segments arrive as params; both styles work
+export async function PATCH(request: Request, ctx: { params: { id: string } }) {
+  const { id } = await ctx.params;        // Next 15 style
+  return Response.json({ id });
+}
+```
+
+**Pages Router style** — a default export taking `(req, res)`, with `req.query`, `req.body` (JSON and urlencoded bodies are parsed) and `res.status().json()/.send()/.setHeader()/.redirect()`.
+
+TypeScript handlers run through [jiti](https://github.com/unjs/jiti), so no build step is needed. `HEAD` falls back to `GET`, `OPTIONS` is answered automatically, and an unexported method returns 405 with an `Allow` header.
+
+**Hot reload:** editing a handler takes effect on the next request. Module-level state (an in-memory list, a counter) is preserved *between* requests and reset when the file changes. Adding or deleting route files re-scans automatically.
+
+This is a mock layer, not a Next.js runtime — `middleware.ts`, the edge runtime, ISR/SSG, and `next/headers`-style request context are out of scope.
 
 ### In-page events
 
