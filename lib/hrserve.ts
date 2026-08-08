@@ -160,33 +160,40 @@ export function createServer(browser: Browser): HRServer {
   const patchScript: PatcherFunction = async ({ cdp }, url, scriptSource) => {
     if (!scriptSource) return { applied: false, reason: "empty-content" };
 
+    let sourceSwapped = false;
+    let reason = "";
+
+    // Swapping the running source is best effort, but the script-patch event
+    // below is a documented contract and must fire on every change — including
+    // when Debugger.scriptParsed never told us about this URL (which happens
+    // for scripts the debugger did not register, e.g. under load or when the
+    // Debugger domain is unavailable).
     const scriptDetails = scriptUrlToDetails.get(url);
     if (!scriptDetails) {
       log("no known script for", url);
-      return { applied: false, reason: "script-not-loaded" };
-    }
-    let sourceSwapped = false;
-    let reason = "";
-    try {
-      const result = await cdp.send("Debugger.setScriptSource", {
-        scriptId: scriptDetails.scriptId,
-        scriptSource,
-        allowTopFrameEditing: true,
-      });
-      sourceSwapped = result.status === "Ok";
-      if (!sourceSwapped) {
-        console.warn("Failed to patch script", result);
-        reason = `live-edit-rejected: ${result.status}`;
+      reason = "script-not-registered-by-debugger";
+    } else {
+      try {
+        const result = await cdp.send("Debugger.setScriptSource", {
+          scriptId: scriptDetails.scriptId,
+          scriptSource,
+          allowTopFrameEditing: true,
+        });
+        sourceSwapped = result.status === "Ok";
+        if (!sourceSwapped) {
+          console.warn("Failed to patch script", result);
+          reason = `live-edit-rejected: ${result.status}`;
+        }
+      } catch (e) {
+        // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145:
+        // https://developer.chrome.com/blog/devtools-deprecates-live-editing
+        // The script-patch event below is the reliable way for pages to react.
+        if (!liveEditUnavailableWarned) {
+          liveEditUnavailableWarned = true;
+          console.warn("Live script patching unavailable in this browser:", (e as Error).message);
+        }
+        reason = "live-edit-unavailable";
       }
-    } catch (e) {
-      // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145:
-      // https://developer.chrome.com/blog/devtools-deprecates-live-editing
-      // The script-patch event below is the reliable way for pages to react.
-      if (!liveEditUnavailableWarned) {
-        liveEditUnavailableWarned = true;
-        console.warn("Live script patching unavailable in this browser:", (e as Error).message);
-      }
-      reason = "live-edit-unavailable";
     }
 
     // Let page code react to the change (e.g. re-run initialization).
