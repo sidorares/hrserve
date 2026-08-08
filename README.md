@@ -12,6 +12,8 @@ npx hrserve [dir] --url http://localhost:3000/
 
 Options:
 - `--url`: Base URL of the page (default: `http://localhost:3000/`)
+- `--profile`: Start from a saved [profile](#session-profiles)'s cookies and storage
+- `--save-profile`: On Ctrl-C, save this session's cookies and storage under this name
 - `--devtools, -d`: Run with devtools initially open
 - `--verbose, -v`: Run with verbose logging
 - `--width, -w`: Width of the browser window
@@ -70,6 +72,10 @@ Starts serving files and watching for changes. Resolves with the Playwright `Pag
 - `options.height`: Browser window height (default: 720)
 - `options.verbose`: Log request routing and CDP events (default: false)
 
+#### `server.saveProfile(name)`
+
+Snapshots the current session's cookies and storage as a named [profile](#session-profiles). Resolves with a summary (`name`, `parent`, `capturedAt`, `origins`, `cookieDomains`).
+
 #### `server.close()`
 
 Stops watching files. Does not close the browser — the caller owns it.
@@ -118,6 +124,49 @@ window.addEventListener("script-patch", (event) => {
   console.log("changed:", event.detail.scriptUrl);
 });
 ```
+
+## Session profiles
+
+Every session starts in a fresh browser context, which is usually what you want — but not when getting to the interesting page means logging in or clearing a captcha by hand. A **profile** saves that work so later sessions can start from it.
+
+```bash
+npx hrserve ./public --url https://app.example.com/ --save-profile prod-login
+#   ... log in in the browser window, then press Ctrl-C to capture ...
+
+npx hrserve ./public --url https://app.example.com/ --profile prod-login   # already logged in
+npx hrserve profiles                                                       # list what's saved
+```
+
+Programmatically:
+
+```javascript
+const server = createServer(browser);
+await server.serve({ url: "https://app.example.com/", dir: "./dist", profile: "prod-login" });
+// ...do more manual steps in the page...
+await server.saveProfile("prod-login-2fa");
+```
+
+### Profiles are immutable snapshots
+
+A profile is one JSON file holding Playwright's `storageState`: cookies, per-origin localStorage and IndexedDB. Sessions **read** profiles and never write back — `saveProfile()` is the only way state is persisted, and it always writes a *new* name.
+
+That single rule is what makes branching trivial and safe:
+
+```
+serve(--save-profile A)            # fresh; log in by hand → A
+serve(--profile A)                 # B starts from A
+serve(--profile A) → save as C     # C starts from A too, concurrently, and adds more
+serve(--profile C)                 # D starts from C
+```
+
+Two sessions can run from the same profile at the same time without interfering, and starting from `A` gives the same result no matter what `C` did afterwards. There is no `fork` command because forking *is* "start from X, save as Y". Each profile records the `parent` it branched from, shown by `hrserve profiles` — that lineage is descriptive only; every snapshot is complete on its own.
+
+### Two things to know
+
+- **A profile is a credential file.** It contains live session cookies, so profiles are stored per-user outside your project — `$XDG_DATA_HOME/hrserve/profiles/` (default `~/.local/share/hrserve/profiles/`), mode `0600`. Never commit one.
+- **Profiles are origin-scoped.** `storageState` belongs to the origins it was captured on, and hrserve deliberately serves at arbitrary origins — a profile captured on `https://app.example.com` does nothing for a session served at `http://app.hrserve.test/`. hrserve warns when the profile doesn't cover the URL you're serving, because the alternative is a silently logged-out page.
+
+A profile carries what `storageState` carries. It does **not** capture sessionStorage, service worker caches, HTTP auth, WebAuthn credentials or browser extensions — those need a persistent browser user-data directory, which cannot be shared between concurrent sessions and so is deliberately out of scope here.
 
 ## Supported File Types
 
