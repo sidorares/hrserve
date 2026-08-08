@@ -2,6 +2,7 @@ import path from "node:path";
 import chokidar from "chokidar";
 import { createJiti } from "jiti";
 import { type MockRoute, type RouteMatch, matchRoute, scanRoutes } from "./mock-routes";
+import { type WatchOptions, watchOptions } from "./watch-options";
 
 /**
  * Executes file-based mock API routes in this process — no port, no spawned
@@ -30,11 +31,14 @@ type JitiInstance = ReturnType<typeof createJiti>;
 export interface MockRouterOptions {
   dir: string;
   log?: (...args: unknown[]) => void;
+  /** Write-settling policy, shared with the served-file watchers in serve(). */
+  watch?: WatchOptions;
 }
 
 export class MockRouter {
   private readonly dir: string;
   private readonly log: (...args: unknown[]) => void;
+  private readonly watch?: WatchOptions;
   private routes: MockRoute[] = [];
   private watcher?: chokidar.FSWatcher;
   /** Modules are cached so handlers can keep in-memory state (a todo list, a
@@ -44,6 +48,7 @@ export class MockRouter {
   constructor(options: MockRouterOptions) {
     this.dir = path.resolve(options.dir);
     this.log = options.log ?? (() => {});
+    this.watch = options.watch;
     this.jiti = createJiti(path.join(this.dir, "__hrserve_mock_entry__.js"), {
       interopDefault: true,
       moduleCache: true,
@@ -53,7 +58,14 @@ export class MockRouter {
   async start(): Promise<void> {
     await this.rescan();
 
-    const watcher = chokidar.watch(this.dir, { ignoreInitial: true });
+    // awaitWriteFinish, not chokidar's defaults: without it the 50ms leading-edge
+    // throttle on `change` swallows the second of two back-to-back saves, and with
+    // it the resetModules() call below — leaving the stale handler serving requests
+    // until some later edit gets through. See watch-options.ts.
+    const watcher = chokidar.watch(this.dir, {
+      ignoreInitial: true,
+      ...watchOptions(this.watch),
+    });
     this.watcher = watcher;
 
     const onStructureChange = async (file: string) => {
