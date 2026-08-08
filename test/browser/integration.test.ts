@@ -583,6 +583,54 @@ describe("hrserve integration", () => {
     }
   });
 
+  // The mock-handler equivalent lives in mock-api.test.ts; this covers the
+  // other watcher, where a dropped change costs a patch rather than a stale
+  // module. Both paths go through watchOptions(), and both need a test that
+  // writes inside the 50ms window chokidar would otherwise throttle away.
+  it("patches both of two edits made back to back", async () => {
+    const dir = await makeFixture({
+      "index.html":
+        '<!DOCTYPE html><html><head><link rel="stylesheet" href="style.css"></head>' +
+        "<body><h1>twice</h1></body></html>",
+      "style.css": "h1 { color: rgb(255, 0, 0); }",
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://twice.hrserve.test/", dir });
+      const cssPath = path.join(dir, "style.css");
+
+      await watcherSettle();
+      const first = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(cssPath, "h1 { color: rgb(0, 128, 0); }");
+      const [firstEvent] = await first;
+      assert.equal(firstEvent.applied, true);
+
+      // Deliberately no betweenWrites() here — spacing the writes out is what
+      // this test exists to avoid. A patch event arrives well inside chokidar's
+      // 50ms change throttle, so the second write lands in the window that used
+      // to swallow it.
+      const second = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(cssPath, "h1 { color: rgb(0, 0, 255); }");
+      const [secondEvent] = await second;
+      assert.equal(secondEvent.applied, true);
+      assert.equal(secondEvent.fileName, cssPath);
+
+      // ...and it is the second edit that is in the page
+      await waitFor(
+        () =>
+          (page as Page).evaluate(
+            () => getComputedStyle(document.querySelector("h1") as Element).color
+          ),
+        (color) => color === "rgb(0, 0, 255)"
+      );
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reloads images with a cache buster, including CSS backgrounds", async () => {
     const dir = await makeFixture({
       "index.html":
