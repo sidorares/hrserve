@@ -78,6 +78,8 @@ describe("MCP server", () => {
       "page_reload",
       "page_screenshot",
       "patch_history",
+      "profile_list",
+      "profile_save",
       "serve_list",
       "serve_start",
       "serve_stop",

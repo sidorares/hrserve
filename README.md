@@ -197,6 +197,10 @@ import { SessionManager } from "hrserve/dist/lib/session-manager.js";
 const manager = new SessionManager({ browser });
 await manager.start({ name: "feature-a", dir: "~/wt/feature-a" });
 await manager.start({ name: "feature-b", dir: "~/wt/feature-b" }); // same URL, no conflict
+
+// Sign in once, then start every worktree's session already authenticated
+await manager.start({ name: "feature-c", dir: "~/wt/feature-c", profile: "app-login" });
+await manager.get("feature-c").saveProfile("app-login-with-cart"); // snapshot, never overwrites
 ```
 
 Each session buffers its own console output, request log and patch history.
@@ -211,7 +215,8 @@ Register it with an MCP-capable agent and it can serve a worktree and then *veri
 
 | Tool | What it answers |
 |---|---|
-| `serve_start` / `serve_list` / `serve_stop` | session lifecycle, one per worktree |
+| `serve_start` / `serve_list` / `serve_stop` | session lifecycle, one per worktree (pass `profile` to start signed in) |
+| `profile_list` / `profile_save` | reuse a sign-in across sessions — see [Session profiles](#session-profiles) |
 | `page_screenshot` | "what does it look like now?" |
 | `page_console` | "did my change break anything?" (console + uncaught errors) |
 | `page_network` | "why did that request return that?" — each entry labelled `served-local`, `mocked`, `proxied`, `upstream` or `blocked` |

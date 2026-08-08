@@ -1,6 +1,12 @@
 import path from "node:path";
 import type { Browser, BrowserContext, ConsoleMessage, Page } from "playwright";
-import { type PatchOutcome, type RequestEvent, createServer } from "./hrserve";
+import {
+  type PatchOutcome,
+  ProfileStore,
+  type ProfileSummary,
+  type RequestEvent,
+  createServer,
+} from "./hrserve";
 import type { Rule } from "./rules";
 
 /**
@@ -28,6 +34,12 @@ export interface StartSessionOptions {
   mockPath?: string;
   /** Convenience: proxy `mockPath` requests that no mock route answers. */
   proxy?: string;
+  /**
+   * Saved profile to start from, so a session begins already logged in
+   * instead of repeating a manual sign-in. The session never writes back
+   * to it — call `session.saveProfile()` to snapshot the result.
+   */
+  profile?: string;
   width?: number;
   height?: number;
 }
@@ -57,6 +69,8 @@ export interface SessionInfo {
   name: string;
   url: string;
   dir: string;
+  /** Profile this session started from, if any. */
+  profile?: string;
   createdAt: number;
   patches: number;
   /** Console errors + uncaught page exceptions seen so far. */
@@ -95,6 +109,7 @@ export class Session {
   readonly name: string;
   readonly url: string;
   readonly dir: string;
+  readonly profile?: string;
   readonly createdAt = Date.now();
   readonly console: ConsoleEntry[];
   readonly network: NetworkEntry[];
@@ -107,11 +122,13 @@ export class Session {
     readonly page: Page,
     readonly context: BrowserContext,
     private readonly server: ReturnType<typeof createServer>,
-    buffers: SessionBuffers
+    buffers: SessionBuffers,
+    profile?: string
   ) {
     this.name = name;
     this.url = url;
     this.dir = dir;
+    this.profile = profile;
     this.console = buffers.console;
     this.network = buffers.network;
     this.patches = buffers.patches;
@@ -122,10 +139,21 @@ export class Session {
       name: this.name,
       url: this.url,
       dir: this.dir,
+      profile: this.profile,
       createdAt: this.createdAt,
       patches: this.patches.length,
       errors: this.console.filter((entry) => entry.type === "error").length,
     };
+  }
+
+  /**
+   * Snapshot this session's cookies and storage under a new profile name, so
+   * work done here (a sign-in, a captcha) can be reused by later sessions.
+   * The profile this session started from is left untouched and recorded as
+   * the new snapshot's parent.
+   */
+  saveProfile(name: string): Promise<ProfileSummary> {
+    return this.server.saveProfile(name);
   }
 
   /** Wait for the next patch — lets an agent await "my edit landed" rather than poll. */
@@ -152,12 +180,18 @@ export class Session {
 
 export interface SessionManagerOptions {
   browser: Browser;
+  /** Where named profiles are stored. Defaults to the per-user data directory. */
+  profilesDir?: string;
 }
 
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
+  /** The profiles sessions here can start from, in the same directory they save to. */
+  readonly profiles: ProfileStore;
 
-  constructor(private readonly options: SessionManagerOptions) {}
+  constructor(private readonly options: SessionManagerOptions) {
+    this.profiles = new ProfileStore(options.profilesDir);
+  }
 
   list(): SessionInfo[] {
     return [...this.sessions.values()].map((session) => session.info);
@@ -185,7 +219,7 @@ export class SessionManager {
     const rules = options.rules ?? buildRules(options);
 
     const buffers: SessionBuffers = { console: [], network: [], patches: [] };
-    const server = createServer(this.options.browser);
+    const server = createServer(this.options.browser, { profilesDir: this.options.profilesDir });
 
     // Subscribe before serving: the initial navigation already produces
     // requests and console output, and an agent asking "what happened on load?"
@@ -212,6 +246,7 @@ export class SessionManager {
       url,
       dir,
       rules,
+      profile: options.profile,
       width: options.width,
       height: options.height,
       onPage: (page) => {
@@ -234,7 +269,16 @@ export class SessionManager {
       },
     });
 
-    const session = new Session(options.name, url, dir, page, page.context(), server, buffers);
+    const session = new Session(
+      options.name,
+      url,
+      dir,
+      page,
+      page.context(),
+      server,
+      buffers,
+      options.profile
+    );
     this.sessions.set(options.name, session);
     return session.info;
   }
