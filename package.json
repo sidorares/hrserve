@@ -28,6 +28,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "chokidar": "^3.6.0",
     "csstree-validator": "^3.0.0",
     "jiti": "^2.7.0",
@@ -35,7 +36,8 @@
     "picomatch": "^2.3.2",
     "playwright": "^1.62.1",
     "serve-handler": "^6.1.6",
-    "yargs": "^17.7.2"
+    "yargs": "^17.7.2",
+    "zod": "^4.4.3"
   },
   "keywords": [
     "dx",

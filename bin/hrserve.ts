@@ -6,6 +6,8 @@ import type { ArgumentsCamelCase, Argv } from "yargs";
 import { hideBin } from "yargs/helpers";
 
 import { type Rule, createServer } from "../lib/hrserve";
+import { createMcpServer } from "../lib/mcp-server";
+import { SessionManager } from "../lib/session-manager";
 
 interface CLIArgs {
   dir?: string;
@@ -19,7 +21,42 @@ interface CLIArgs {
   proxy?: string;
 }
 
+interface McpArgs {
+  headed: boolean;
+}
+
 yargs(hideBin(process.argv))
+  .command(
+    "mcp",
+    "Run an MCP server so agents can start sessions and inspect their pages",
+    (yargs: Argv) =>
+      yargs.option("headed", {
+        type: "boolean",
+        default: false,
+        description: "Show the browser window instead of running headless",
+      }),
+    async (argv: ArgumentsCamelCase<McpArgs>) => {
+      // stdout is the MCP protocol stream: anything written to it corrupts the
+      // session, including a stray console.log inside a user's mock handler.
+      console.log = (...args: unknown[]) => console.error(...args);
+
+      const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+      const browser = await chromium.launch({ headless: !argv.headed });
+      const manager = new SessionManager({ browser });
+      const server = createMcpServer(manager);
+
+      const shutdown = async () => {
+        await manager.closeAll().catch(() => {});
+        await browser.close().catch(() => {});
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+
+      await server.connect(new StdioServerTransport());
+      console.error("hrserve MCP server ready");
+    }
+  )
   .command(
     "$0 [dir]",
     "Serve a page, watch for changes in files used on a page and update page content when files are updated",
