@@ -57,6 +57,7 @@ function withSession<T>(
 
 export function createMcpServer(manager: SessionManager): McpServer {
   const server = new McpServer({ name: "hrserve", version: VERSION });
+  const profiles = manager.profiles;
 
   server.registerTool(
     "serve_start",
@@ -75,6 +76,13 @@ export function createMcpServer(manager: SessionManager): McpServer {
         mockDir: z.string().optional().describe("Directory of file-based mock API routes"),
         mockPath: z.string().optional().describe("Path glob for mocks/proxy (default /api/**)"),
         proxy: z.string().optional().describe("Origin for requests no mock route answers"),
+        profile: z
+          .string()
+          .optional()
+          .describe(
+            "Saved profile to start from, so the session begins already signed in. " +
+              "Omit for a completely fresh session."
+          ),
         width: z.number().optional(),
         height: z.number().optional(),
       },
@@ -113,6 +121,40 @@ export function createMcpServer(manager: SessionManager): McpServer {
         return failure(error);
       }
     }
+  );
+
+  server.registerTool(
+    "profile_list",
+    {
+      title: "List saved profiles",
+      description:
+        "Saved authentication profiles a session can start from, with the origins each covers, " +
+        "when it was captured and which profile it branched from.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return text(await profiles.list());
+      } catch (error) {
+        return failure(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "profile_save",
+    {
+      title: "Save a session as a profile",
+      description:
+        "Snapshot a session's current cookies and storage under a new profile name, so a " +
+        "sign-in or captcha done once can be reused. Profiles are immutable: this always " +
+        "writes a new name and never modifies the one the session started from.",
+      inputSchema: {
+        name: nameArg,
+        as: z.string().describe("Name for the new profile"),
+      },
+    },
+    async ({ name, as }) => withSession(manager, name, (session) => session.saveProfile(as))
   );
 
   server.registerTool(
