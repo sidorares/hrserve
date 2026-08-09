@@ -4,6 +4,8 @@ A development server that serves web pages and automatically patches file change
 
 Instead of running an HTTP server, hrserve launches a Chromium browser and intercepts its network requests: `GET` requests under the base URL are answered from a local directory, and every served file is watched. When a file changes, the running page is patched in place over the Chrome DevTools Protocol — no reload, no lost state.
 
+📚 **[Full documentation](https://sidorares.github.io/hrserve/)** — including [MCP setup for Claude Code, Cursor and VS Code](https://sidorares.github.io/hrserve/mcp-integration).
+
 ## CLI Usage
 
 ```bash
