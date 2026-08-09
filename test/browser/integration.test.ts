@@ -50,10 +50,11 @@ async function waitFor<T>(
 const watcherSettle = () => new Promise((resolve) => setTimeout(resolve, 500));
 
 /**
- * Space out consecutive writes to the same file. chokidar (as configured, with
- * default options) drops every other change when writes land back to back —
- * reproducible with plain chokidar, no hrserve involved — and a delay of about
- * a second is enough to avoid it.
+ * Space out consecutive writes to the same file. Belt and braces since the
+ * watchers moved to `awaitWriteFinish` (see lib/watch-options.ts), which is
+ * what stops chokidar dropping every other back-to-back change; these tests
+ * pass without the delay, and it is kept only to keep them insensitive to the
+ * configured threshold.
  */
 const betweenWrites = () => new Promise((resolve) => setTimeout(resolve, 1200));
 

@@ -174,6 +174,64 @@ describe("mock API routes end to end", () => {
     }
   });
 
+  it("picks up a second handler edit made right after the first", async () => {
+    const dir = await fixture({
+      "index.html": "<!DOCTYPE html><html><body><h1>rapid</h1></body></html>",
+      "mocks/api/version/route.ts": `
+        export function GET() { return Response.json({ version: "v1" }); }
+      `,
+    });
+    const handler = path.join(dir, "mocks", "api", "version", "route.ts");
+    const write = (version: string) =>
+      fs.writeFile(
+        handler,
+        `export function GET() { return Response.json({ version: "${version}" }); }\n`
+      );
+
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({
+        url: "http://rapidmock.hrserve.test/",
+        dir,
+        rules: [
+          { match: "/api/**", action: "mock", dir: path.join(dir, "mocks") },
+          { match: "**", action: "serve" },
+        ],
+      });
+
+      const served = async (): Promise<string> => {
+        const payload = await (page as Page).evaluate(() =>
+          fetch("/api/version").then((r) => r.json())
+        );
+        return payload.version;
+      };
+
+      // Polls with no delay between attempts on purpose: the point of the test
+      // is that the *second* write lands while chokidar's 50ms leading-edge
+      // `change` throttle from the first one is still open, and a sleep here
+      // would step around the bug instead of reproducing it.
+      const waitFor = async (version: string) => {
+        const deadline = Date.now() + 10_000;
+        let seen = await served();
+        while (seen !== version && Date.now() < deadline) seen = await served();
+        return seen;
+      };
+
+      assert.equal(await served(), "v1");
+
+      await write("v2");
+      assert.equal(await waitFor("v2"), "v2", "first edit should be picked up");
+
+      await write("v3");
+      assert.equal(await waitFor("v3"), "v3", "second edit should not be swallowed");
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("serves a Next-style app directory directly, ignoring its UI files", async () => {
     const dir = await fixture({
       "index.html": "<!DOCTYPE html><html><body><h1>next</h1></body></html>",

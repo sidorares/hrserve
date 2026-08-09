@@ -21,9 +21,11 @@ import {
 } from "./resolve-request";
 import { type Rule, normalizeRules } from "./rules";
 import { serveDirectoryListing } from "./serve-directory";
+import { type WatchOptions, watchOptions } from "./watch-options";
 
 export type { Rule, ServeRule, UpstreamRule, ProxyRule, MockRule } from "./rules";
 export type { ScriptReloadMode } from "./patch-script";
+export { WATCH_DEFAULTS, type WatchOptions } from "./watch-options";
 export {
   ProfileStore,
   defaultProfilesDir,
@@ -56,6 +58,12 @@ interface ServeOptions {
    * the `script-patch` event. See {@link ScriptReloadMode}.
    */
   scriptReload?: ScriptReloadMode;
+  /**
+   * How long a file must stop changing before hrserve reacts to it. Applies to
+   * every watcher — served files and mock handler files alike — so there is a
+   * single number to tune. See {@link WATCH_DEFAULTS}.
+   */
+  watch?: WatchOptions;
   width?: number;
   height?: number;
   /** Log request routing and CDP events. */
@@ -283,6 +291,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
       height = 720,
       verbose = false,
       scriptReload: scriptReloadOption = "auto",
+      watch,
     } = options;
     if (verbose) {
       log = (...args: unknown[]) => console.log(...args);
@@ -297,7 +306,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
     // Mock rules need their route directory scanned (and watched) before serving
     for (const rule of routeConfig.rules) {
       if (rule.action !== "mock") continue;
-      const router = new MockRouter({ dir: rule.dir as string, log });
+      const router = new MockRouter({ dir: rule.dir as string, log, watch });
       await router.start();
       rule.router = router;
       mockRouters.push(router);
@@ -451,7 +460,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
           // watching; watching the cache-busted URL as well would double the
           // patch events (and double them again on every subsequent edit).
           if (patcher && !isHotUpdateUrl(url) && !watchers.has(url)) {
-            const watcher = chokidar.watch(filePath);
+            const watcher = chokidar.watch(filePath, watchOptions(watch));
             watcher.on("change", async () => {
               try {
                 const newContent = await fs.readFile(filePath, "utf-8");
