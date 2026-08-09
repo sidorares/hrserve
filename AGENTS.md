@@ -13,7 +13,8 @@ hrserve is a hot-reload development server with an unusual architecture: **the b
 ## File map
 
 - `lib/hrserve.ts` — the core. `createServer()` sets up per-MIME-type patchers, the CDP session, request routing, and file watchers. Public API: `serve()`, `close()`, events `patch` / `new-resource`.
-- `lib/resolve-request.ts` — pure-ish mapping from a request URL to a decision: serve a file, fall back to serve-handler (listing/404), 404, or pass through to the network. All URL/path edge cases live here; it is unit-tested.
+- `lib/rules.ts` — the routing rule table: user-facing `Rule` types (`serve` / `upstream` / `proxy`), normalization (defaults, validation) and glob matching via picomatch. Rules are ordered, first match wins, matched against the path relative to the base URL.
+- `lib/resolve-request.ts` — pure-ish mapping from a request URL to a decision: serve a file, proxy, fall back to serve-handler (listing/404), 404, or pass through to the network. All URL/path edge cases live here; it is unit-tested.
 - `lib/serve-directory.ts` — bridges serve-handler (which expects Node `IncomingMessage`/`ServerResponse`) onto a Playwright `Route` with mock request/response objects. Used for directory listings and 404 pages.
 - `lib/reload-image.ts` — an in-page function (run via `page.evaluate`) that cache-busts every reference to a changed image: `<img>`, `srcset`, CSS rules, inline styles, SVG `<image>`, favicons, etc.
 - `lib/types.d.ts` — hand-written declaration for `csstree-validator` (no upstream types).
@@ -39,6 +40,7 @@ The `patch` event is emitted **once per file change by the watcher callback** in
 - **URL matching must be segment-aware.** `resolve-request.ts` compares parsed origin + pathname, not string prefixes — `http://localhost:3000` must not capture `http://localhost:30001`, and base `/app` must not capture `/apple`. Paths are percent-decoded before hitting the filesystem, with a containment check because encoded slashes (`%2f`) survive URL normalization and could otherwise escape `dir`.
 - **serve-handler's response contract is messy.** It both assigns `response.statusCode` directly *and* calls `writeHead()`, and mixes `setHeader()` with `writeHead()` headers. The mock in `serve-directory.ts` keeps a real `statusCode` property and merges (never replaces) headers. It receives the raw **URL path** (e.g. `/sub/`), not a filesystem path — serve-handler does its own decoding.
 - **mime-db has flip-flopped on `.js`** between `application/javascript` and `text/javascript`; the JS patcher is registered under both keys.
+- **Proxying must use `route.fetch()` + `route.fulfill()`, never `route.continue({ url })`.** Playwright accepts a cross-origin `continue({ url })` without complaint, but the browser then applies CORS to the response and the page gets "Failed to fetch" — verified, and the reason the proxy rule is implemented the way it is. Fetching from Node and fulfilling locally keeps the response same-origin from the page's perspective.
 
 ## Commands
 

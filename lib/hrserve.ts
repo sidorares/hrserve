@@ -4,12 +4,24 @@ import chokidar from "chokidar";
 import { validate } from "csstree-validator";
 import type { Browser, CDPSession, Page, Request, Route } from "playwright";
 import { IMAGE_MIME_TYPES, reloadImage } from "./reload-image";
-import { resolveRequest } from "./resolve-request";
+import { type ResolveConfig, normalizeBaseUrl, resolveRequest } from "./resolve-request";
+import { type Rule, normalizeRules } from "./rules";
 import { serveDirectoryListing } from "./serve-directory";
+
+export type { Rule, ServeRule, UpstreamRule, ProxyRule } from "./rules";
 
 interface ServeOptions {
   url: string;
-  dir: string;
+  /**
+   * Directory to serve from. Optional when every rule carries its own `dir`.
+   * With no `rules`, everything under `url` is served from here.
+   */
+  dir?: string;
+  /**
+   * Ordered routing rules, first match wins. Paths are matched relative to the
+   * base `url` (e.g. "/api/**"). Requests matching no rule go to the network.
+   */
+  rules?: Rule[];
   width?: number;
   height?: number;
   /** Log request routing and CDP events. */
@@ -154,10 +166,15 @@ export function createServer(browser: Browser): HRServer {
 
   // Main server functionality
   server.serve = async (options: ServeOptions): Promise<Page> => {
-    const { url: targetUrl, dir, width = 1280, height = 720, verbose = false } = options;
+    const { url: targetUrl, dir, rules, width = 1280, height = 720, verbose = false } = options;
     if (verbose) {
       log = (...args: unknown[]) => console.log(...args);
     }
+
+    const routeConfig: ResolveConfig = {
+      baseUrl: normalizeBaseUrl(targetUrl),
+      rules: normalizeRules(rules, dir),
+    };
 
     const context = await browser.newContext({
       viewport: { width, height },
@@ -224,23 +241,32 @@ export function createServer(browser: Browser): HRServer {
 
     // Use Playwright's route API for request interception
     await page.route("**/*", async (route: Route, request: Request) => {
-      if (request.method() !== "GET") {
-        return route.continue();
-      }
-
       const url = request.url();
-      const resolved = await resolveRequest(dir, targetUrl, url);
-      log("request", url, "->", resolved.kind);
+      const resolved = await resolveRequest(routeConfig, url, request.method());
+      log("request", request.method(), url, "->", resolved.kind);
 
       switch (resolved.kind) {
         case "pass":
           return route.continue();
+        case "proxy": {
+          // Fetch from Node rather than route.continue({ url }): continuing to
+          // another origin makes the browser apply CORS to the response, which
+          // defeats the point. Fetching here and fulfilling locally keeps the
+          // response same-origin as far as the page is concerned.
+          try {
+            const response = await route.fetch({ url: resolved.target });
+            return await route.fulfill({ response });
+          } catch (e) {
+            console.warn("Proxy request failed", resolved.target, e);
+            return route.fulfill({ status: 502, body: "hrserve: proxy request failed" });
+          }
+        }
         case "forbidden":
         case "unknown-type":
           return route.fulfill({ status: 404 });
         case "fallback":
           // serve-handler renders the directory listing / 404 page
-          return serveDirectoryListing(dir, route, resolved.urlPath);
+          return serveDirectoryListing(resolved.dir, route, resolved.urlPath);
         case "file": {
           const { filePath, mimeType } = resolved;
           const body = await fs.readFile(filePath);

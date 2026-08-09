@@ -64,7 +64,8 @@ Starts serving files and watching for changes. Resolves with the Playwright `Pag
 
 **Parameters:**
 - `options.url`: The base URL to serve
-- `options.dir`: Directory to serve files from
+- `options.dir`: Directory to serve files from (optional when every rule sets its own `dir`)
+- `options.rules`: Ordered routing rules — see [Routing rules](#routing-rules)
 - `options.width`: Browser window width (default: 1280)
 - `options.height`: Browser window height (default: 720)
 - `options.verbose`: Log request routing and CDP events (default: false)
@@ -80,6 +81,33 @@ Listen for server events.
 **Events:**
 - `'patch'`: Emitted once per file change. Handler receives `{ fileName, url, mimeType }`
 - `'new-resource'`: Emitted when a served file starts being watched. Handler receives `{ url, mimeType }`
+
+## Routing rules
+
+By default every `GET` under the base URL is served from `dir`. Pass `rules` to mix local files with real network traffic — an ordered list, **first match wins**:
+
+```javascript
+await server.serve({
+  url: "https://app.example.com/",
+  dir: "./dist",
+  rules: [
+    { match: "/assets/**", action: "serve", dir: "./dist/assets" },
+    { match: "/api/**", action: "proxy", target: "https://staging-api.example.com" },
+    { match: "/health", action: "upstream" },
+    { match: "**", action: "serve" },
+  ],
+});
+```
+
+`match` is a glob ([picomatch](https://github.com/micromatch/picomatch) syntax) tested against the request path **relative to the base URL**, so with a base of `https://app.example.com/` the rule `/api/**` matches `https://app.example.com/api/users`. It defaults to `**`. An optional `methods: ["POST"]` narrows a rule to specific HTTP methods.
+
+**Actions:**
+
+- `serve` — answer from `dir` (falling back to a directory listing or 404 page). Only `GET`/`HEAD`; other methods go to the network. Served files are watched and patched as usual. `dir` defaults to the top-level `dir`, and mirrors the URL space beneath it.
+- `upstream` — let the request through to the real network, untouched.
+- `proxy` — send the request to `target`, preserving path, query, method, headers and body. hrserve performs this request itself and returns the result as if it came from the page's own origin, **so the page is not subject to CORS**. A path prefix on the target is kept: target `https://example.com/v2` + request `/api/users` → `https://example.com/v2/api/users`. If the target is unreachable the page gets a 502.
+
+Requests matching **no** rule go to the network, so a rule list without a `**` entry is an overlay rather than a full server.
 
 ### In-page events
 
