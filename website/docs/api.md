@@ -26,6 +26,7 @@ Starts serving and watching. Resolves with the Playwright `Page` after the first
 | `profile` | `string` | Saved [profile](./profiles.md) to start from |
 | `scriptReload` | `"auto" \| "evaluate" \| "import" \| "off"` | How changed JavaScript is applied (default `"auto"`: re-run classic scripts, re-import ES modules) |
 | `width` / `height` | `number` | Viewport size (default 1280×720) |
+| `watch` | `{ stabilityThreshold, pollInterval }` | ms a file must stop changing before hrserve reacts (default `{ 50, 10 }`), for served files and mock handlers alike. Raise it for a network filesystem or an editor that saves in several steps — it is added to the latency of every patch |
 | `verbose` | `boolean` | Log request routing and CDP events |
 | `onPage` | `(page) => unknown` | Called after interception is installed but **before** the first navigation — the only place to attach listeners that must not miss the initial load |
 

@@ -136,8 +136,10 @@ describe("SessionManager", () => {
     assert.equal(good.applied, true);
     assert.equal(good.mimeType, "text/css");
 
-    // Two writes landing in the same mtime tick look like one change to
-    // chokidar, so space them out before editing the same file again.
+    // Belt and braces, like betweenWrites() in integration.test.ts: back-to-back
+    // writes are handled by awaitWriteFinish (lib/watch-options.ts), and the
+    // delay only keeps this test — which is about patch history, not watching —
+    // insensitive to the configured threshold.
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Invalid CSS is detected but deliberately not applied — the history says so
