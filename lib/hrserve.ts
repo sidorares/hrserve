@@ -2,13 +2,21 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import chokidar from "chokidar";
 import { validate } from "csstree-validator";
-import type { Browser, CDPSession, Page, Request, Route } from "playwright";
+import type { Browser, BrowserContext, CDPSession, Page, Request, Route } from "playwright";
+import { ProfileStore, type ProfileSummary, profileCoversUrl } from "./profiles";
 import { IMAGE_MIME_TYPES, reloadImage } from "./reload-image";
 import { type ResolveConfig, normalizeBaseUrl, resolveRequest } from "./resolve-request";
 import { type Rule, normalizeRules } from "./rules";
 import { serveDirectoryListing } from "./serve-directory";
 
 export type { Rule, ServeRule, UpstreamRule, ProxyRule } from "./rules";
+export {
+  ProfileStore,
+  defaultProfilesDir,
+  profileCoversUrl,
+  type Profile,
+  type ProfileSummary,
+} from "./profiles";
 
 interface ServeOptions {
   url: string;
@@ -22,6 +30,12 @@ interface ServeOptions {
    * base `url` (e.g. "/api/**"). Requests matching no rule go to the network.
    */
   rules?: Rule[];
+  /**
+   * Name of a saved profile to start from, restoring its cookies and storage.
+   * Omit for a completely fresh session. The session never writes back to it —
+   * call `saveProfile()` to snapshot the result under a new name.
+   */
+  profile?: string;
   width?: number;
   height?: number;
   /** Log request routing and CDP events. */
@@ -46,6 +60,13 @@ interface NewResourceEvent {
 
 interface HRServer extends EventEmitter {
   serve(options: ServeOptions): Promise<Page>;
+  /**
+   * Snapshot this session's current cookies and storage as a named profile,
+   * so manual work (a login, a captcha) can be reused by later sessions.
+   * Saving is always explicit: nothing is written back to the profile the
+   * session started from, so branching from it stays reproducible.
+   */
+  saveProfile(name: string): Promise<ProfileSummary>;
   /** Stop watching files. Does not close the browser (the caller owns it). */
   close(): Promise<void>;
   on(event: "patch", listener: (data: PatchEvent) => void): this;
@@ -75,12 +96,21 @@ interface ScriptDetails {
   url: string;
 }
 
-export function createServer(browser: Browser): HRServer {
+export interface ServerOptions {
+  /** Where named profiles are stored. Defaults to the per-user data directory. */
+  profilesDir?: string;
+}
+
+export function createServer(browser: Browser, options: ServerOptions = {}): HRServer {
   const server = new EventEmitter() as HRServer;
   const watchers = new Map<string, chokidar.FSWatcher>();
   const patchers = new Map<string, PatcherFunction>();
   const scriptUrlToDetails = new Map<string, ScriptDetails>();
   const stylesheetUrlToId = new Map<string, string>();
+  const profiles = new ProfileStore(options.profilesDir);
+  /** Set by serve(), used by saveProfile() to snapshot and to record lineage. */
+  let activeContext: BrowserContext | undefined;
+  let activeProfile: string | undefined;
   let log: (...args: unknown[]) => void = () => {};
 
   // Setup patchers for different MIME types
@@ -176,9 +206,23 @@ export function createServer(browser: Browser): HRServer {
       rules: normalizeRules(rules, dir),
     };
 
+    const profile = options.profile ? await profiles.load(options.profile) : undefined;
+    if (profile && !profileCoversUrl(profile, targetUrl)) {
+      // Silently serving a logged-out page is the worst outcome here, so say
+      // exactly what was captured and what is being served.
+      const captured = [...profile.origins, ...profile.cookieDomains].join(", ") || "nothing";
+      console.warn(
+        `Profile "${profile.name}" holds state for ${captured}, which does not cover ${targetUrl} — ` +
+          "its cookies and storage will not apply to this session."
+      );
+    }
+
     const context = await browser.newContext({
       viewport: { width, height },
+      storageState: profile?.storageState,
     });
+    activeContext = context;
+    activeProfile = options.profile;
     const page = await context.newPage();
 
     const cdp = await page.context().newCDPSession(page);
@@ -301,6 +345,16 @@ export function createServer(browser: Browser): HRServer {
 
     await page.goto(targetUrl);
     return page;
+  };
+
+  server.saveProfile = async (name: string): Promise<ProfileSummary> => {
+    if (!activeContext) {
+      throw new Error("saveProfile() needs a running session: call serve() first.");
+    }
+    // IndexedDB is where several auth libraries keep their tokens, so a profile
+    // that omitted it would restore a half-logged-in session.
+    const storageState = await activeContext.storageState({ indexedDB: true });
+    return profiles.save(name, { storageState, parent: activeProfile });
   };
 
   server.close = async () => {
