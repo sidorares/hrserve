@@ -31,7 +31,19 @@ export interface ProxyRule {
   target: string;
 }
 
-export type Rule = ServeRule | UpstreamRule | ProxyRule;
+/**
+ * Answer the request from file-based mock API routes executed in this process.
+ * If no mock route matches the path, the request falls through to the next rule.
+ */
+export interface MockRule {
+  match?: string;
+  methods?: string[];
+  action: "mock";
+  /** Directory of route files; mirrors the URL space below the base URL. */
+  dir: string;
+}
+
+export type Rule = ServeRule | UpstreamRule | ProxyRule | MockRule;
 
 export interface NormalizedRule {
   match: string;
@@ -39,7 +51,14 @@ export interface NormalizedRule {
   action: Rule["action"];
   dir?: string;
   target?: string;
+  /** Attached by serve() for mock rules, once the route directory is scanned. */
+  router?: MockRouterLike;
   isMatch(urlPath: string): boolean;
+}
+
+/** Structural type so rules.ts stays free of the mock runtime's imports. */
+export interface MockRouterLike {
+  match(urlPath: string): unknown;
 }
 
 /**
@@ -53,13 +72,20 @@ export function normalizeRules(rules: Rule[] | undefined, defaultDir?: string): 
 
   return source.map((rule, index) => {
     const match = rule.match ?? "**";
-    const dir = rule.action === "serve" ? (rule.dir ?? defaultDir) : undefined;
+    let dir: string | undefined;
+    if (rule.action === "serve") {
+      dir = rule.dir ?? defaultDir;
+    } else if (rule.action === "mock") {
+      dir = rule.dir;
+    }
 
     if (rule.action === "serve" && !dir) {
       throw new Error(
-        `Rule ${index} ("${match}") has action "serve" but no directory: ` +
-          "set `dir` on the rule or pass `dir` to serve()."
+        `Rule ${index} ("${match}") has action "serve" but no directory: set \`dir\` on the rule or pass \`dir\` to serve().`
       );
+    }
+    if (rule.action === "mock" && !dir) {
+      throw new Error(`Rule ${index} ("${match}") has action "mock" but no \`dir\`.`);
     }
     if (rule.action === "proxy") {
       // Fail loudly at setup instead of on the first matching request.
@@ -82,16 +108,9 @@ export function normalizeRules(rules: Rule[] | undefined, defaultDir?: string): 
   });
 }
 
-/** Find the first rule matching this path and method; undefined means "not ours". */
-export function matchRule(
-  rules: NormalizedRule[],
-  urlPath: string,
-  method: string
-): NormalizedRule | undefined {
-  const upperMethod = method.toUpperCase();
-  return rules.find(
-    (rule) => (!rule.methods || rule.methods.includes(upperMethod)) && rule.isMatch(urlPath)
-  );
+/** Does this rule apply to the given path and method? */
+export function ruleApplies(rule: NormalizedRule, urlPath: string, method: string): boolean {
+  return (!rule.methods || rule.methods.includes(method.toUpperCase())) && rule.isMatch(urlPath);
 }
 
 /**

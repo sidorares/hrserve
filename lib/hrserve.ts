@@ -3,12 +3,13 @@ import fs from "node:fs/promises";
 import chokidar from "chokidar";
 import { validate } from "csstree-validator";
 import type { Browser, CDPSession, Page, Request, Route } from "playwright";
+import { MockRouter } from "./mock-router";
 import { IMAGE_MIME_TYPES, reloadImage } from "./reload-image";
 import { type ResolveConfig, normalizeBaseUrl, resolveRequest } from "./resolve-request";
 import { type Rule, normalizeRules } from "./rules";
 import { serveDirectoryListing } from "./serve-directory";
 
-export type { Rule, ServeRule, UpstreamRule, ProxyRule } from "./rules";
+export type { Rule, ServeRule, UpstreamRule, ProxyRule, MockRule } from "./rules";
 
 interface ServeOptions {
   url: string;
@@ -78,6 +79,7 @@ interface ScriptDetails {
 export function createServer(browser: Browser): HRServer {
   const server = new EventEmitter() as HRServer;
   const watchers = new Map<string, chokidar.FSWatcher>();
+  const mockRouters: MockRouter[] = [];
   const patchers = new Map<string, PatcherFunction>();
   const scriptUrlToDetails = new Map<string, ScriptDetails>();
   const stylesheetUrlToId = new Map<string, string>();
@@ -176,6 +178,15 @@ export function createServer(browser: Browser): HRServer {
       rules: normalizeRules(rules, dir),
     };
 
+    // Mock rules need their route directory scanned (and watched) before serving
+    for (const rule of routeConfig.rules) {
+      if (rule.action !== "mock") continue;
+      const router = new MockRouter({ dir: rule.dir as string, log });
+      await router.start();
+      rule.router = router;
+      mockRouters.push(router);
+    }
+
     const context = await browser.newContext({
       viewport: { width, height },
     });
@@ -261,6 +272,28 @@ export function createServer(browser: Browser): HRServer {
             return route.fulfill({ status: 502, body: "hrserve: proxy request failed" });
           }
         }
+        case "mock": {
+          try {
+            const result = await resolved.router.handle(resolved.match, {
+              url,
+              method: request.method(),
+              headers: await request.allHeaders(),
+              body: request.postDataBuffer() ?? undefined,
+            });
+            return await route.fulfill({
+              status: result.status,
+              headers: result.headers,
+              body: result.body,
+            });
+          } catch (e) {
+            console.warn("Mock handler failed", resolved.match.route.filePath, e);
+            return route.fulfill({
+              status: 500,
+              headers: { "content-type": "text/plain" },
+              body: `hrserve mock handler failed: ${(e as Error).message}`,
+            });
+          }
+        }
         case "forbidden":
         case "unknown-type":
           return route.fulfill({ status: 404 });
@@ -306,6 +339,7 @@ export function createServer(browser: Browser): HRServer {
   server.close = async () => {
     const closing = [...watchers.values()].map((watcher) => watcher.close());
     watchers.clear();
+    closing.push(...mockRouters.splice(0).map((router) => router.close()));
     await Promise.all(closing);
   };
 

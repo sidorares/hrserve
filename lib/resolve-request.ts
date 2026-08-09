@@ -1,13 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import mime from "mime-types";
-import { type NormalizedRule, buildProxyTarget, matchRule } from "./rules";
+import type { MockRouter } from "./mock-router";
+import type { RouteMatch } from "./mock-routes";
+import { type NormalizedRule, buildProxyTarget, ruleApplies } from "./rules";
 
 export type ResolvedRequest =
   /** Not ours (outside the base URL, or no rule matched): let it hit the network. */
   | { kind: "pass" }
   /** Send the request to another origin with a rewritten URL. */
   | { kind: "proxy"; target: string }
+  /** Answer from an in-process mock API route. */
+  | { kind: "mock"; router: MockRouter; match: RouteMatch }
   /** Request tried to escape the served directory (or has malformed encoding). */
   | { kind: "forbidden" }
   /** File exists but its MIME type is unknown. */
@@ -64,26 +68,41 @@ export async function resolveRequest(
   // and what serve-handler expects).
   const urlPath = requested.pathname.slice(basePath.length - 1) || "/";
 
-  const rule = matchRule(config.rules, urlPath, method);
-  if (!rule) {
-    return { kind: "pass" };
+  // First applicable rule wins, except that a mock rule with no matching route
+  // falls through to the next rule (so "mock what exists, proxy the rest" works).
+  for (const rule of config.rules) {
+    if (!ruleApplies(rule, urlPath, method)) continue;
+
+    switch (rule.action) {
+      case "upstream":
+        return { kind: "pass" };
+
+      case "proxy":
+        return {
+          kind: "proxy",
+          target: buildProxyTarget(rule.target as string, urlPath, requested.search),
+        };
+
+      case "mock": {
+        const router = rule.router as MockRouter | undefined;
+        const match = router?.match(urlPath);
+        if (!match) continue;
+        return { kind: "mock", router: router as MockRouter, match };
+      }
+
+      default:
+        return resolveFile(rule, urlPath, method);
+    }
   }
 
-  switch (rule.action) {
-    case "upstream":
-      return { kind: "pass" };
+  return { kind: "pass" };
+}
 
-    case "proxy":
-      return {
-        kind: "proxy",
-        target: buildProxyTarget(rule.target as string, urlPath, requested.search),
-      };
-
-    default:
-      break;
-  }
-
-  // action: "serve"
+async function resolveFile(
+  rule: NormalizedRule,
+  urlPath: string,
+  method: string
+): Promise<ResolvedRequest> {
   if (!FILE_METHODS.has(method.toUpperCase())) {
     return { kind: "pass" };
   }
