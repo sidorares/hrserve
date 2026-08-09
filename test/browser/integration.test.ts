@@ -220,6 +220,50 @@ describe("hrserve integration", () => {
     }
   });
 
+  it("dispatches script-patch even when the debugger never registered the script", async () => {
+    // A JS file that is fetched but never executed as a <script> produces no
+    // Debugger.scriptParsed event, so hrserve has no scriptId for it. The
+    // documented script-patch contract must hold anyway — CI hit exactly this.
+    const dir = await makeFixture({
+      "index.html": "<!DOCTYPE html><html><body><h1>fetched</h1></body></html>",
+      "lib.js": 'export const value = "v1";\n',
+    });
+    const server = createServer(browser);
+    let page: Page | undefined;
+    try {
+      page = await server.serve({ url: "http://fetched.hrserve.test/", dir });
+      await page.evaluate(() => {
+        const w = window as unknown as { __patchedScripts: string[] };
+        w.__patchedScripts = [];
+        window.addEventListener("script-patch", (event) => {
+          w.__patchedScripts.push((event as CustomEvent<{ scriptUrl: string }>).detail.scriptUrl);
+        });
+      });
+      // Fetching it is enough for hrserve to serve and watch it
+      await page.evaluate(() => fetch("/lib.js").then((r) => r.text()));
+
+      await watcherSettle();
+      const patched = once(server, "patch", { signal: AbortSignal.timeout(PATCH_TIMEOUT) });
+      await fs.writeFile(path.join(dir, "lib.js"), 'export const value = "v2";\n');
+      const [event] = await patched;
+      assert.equal(event.applied, false, "no scriptId means the source cannot be swapped");
+      assert.match(event.reason ?? "", /script-patch event dispatched/);
+
+      const notified = await waitFor(
+        () =>
+          (page as Page).evaluate(
+            () => (window as unknown as { __patchedScripts: string[] }).__patchedScripts
+          ),
+        (urls) => urls.length > 0
+      );
+      assert.deepEqual(notified, ["http://fetched.hrserve.test/lib.js"]);
+    } finally {
+      await page?.context().close();
+      await server.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("replaces the DOM when HTML changes", async () => {
     const dir = await makeFixture({
       "index.html": "<!DOCTYPE html><html><body><h1>one</h1></body></html>",
