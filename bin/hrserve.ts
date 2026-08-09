@@ -5,7 +5,7 @@ import yargs from "yargs";
 import type { ArgumentsCamelCase, Argv } from "yargs";
 import { hideBin } from "yargs/helpers";
 
-import { ProfileStore, type Rule, createServer } from "../lib/hrserve";
+import { ProfileStore, type Rule, type ScriptReloadMode, createServer } from "../lib/hrserve";
 import { createMcpServer } from "../lib/mcp-server";
 import { SessionManager } from "../lib/session-manager";
 
@@ -21,6 +21,7 @@ interface CLIArgs {
   proxy?: string;
   profile?: string;
   saveProfile?: string;
+  scriptReload: ScriptReloadMode;
 }
 
 interface McpArgs {
@@ -140,6 +141,7 @@ yargs(hideBin(process.argv))
         width: argv.width,
         height: argv.height,
         verbose: argv.verbose,
+        scriptReload: argv.scriptReload,
       });
 
       if (argv.saveProfile) {
@@ -193,5 +195,13 @@ yargs(hideBin(process.argv))
     alias: "h",
     type: "number",
     description: "Height of the browser window",
+  })
+  .option("script-reload", {
+    type: "string",
+    choices: ["auto", "evaluate", "import", "off"] as const,
+    description:
+      "How to apply changed JavaScript: re-run classic scripts and re-import modules (auto), " +
+      "force one mechanism, or only dispatch the script-patch event (off)",
+    default: "auto" as const,
   })
   .parse();

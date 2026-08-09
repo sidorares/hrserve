@@ -43,6 +43,7 @@ npx hrserve [dir] --url http://localhost:3000/
 | `--devtools`, `-d` | Open devtools on start |
 | `--verbose`, `-v` | Log request routing and CDP events |
 | `--width`, `--height` | Browser window size |
+| `--script-reload` | How to apply changed JavaScript: `auto` (default), `evaluate`, `import` or `off` |
 
 Two extra commands:
 
@@ -84,25 +85,29 @@ await browser.close();
 |---|---|---|
 | `text/css` | `CSS.setStyleSheetText` | Validated first — invalid CSS is reported, not applied |
 | `text/html` | `DOM.setOuterHTML` | Replaces the document; scroll and focus are not preserved |
-| JavaScript | `script-patch` event on `window` | Plus a best-effort `Debugger.setScriptSource` |
+| JavaScript | Re-run (classic scripts) or re-import (ES modules) | Preceded by a `script-patch` event so you can clean up first |
 | Images | URL cache-busting in the live DOM/CSSOM | PNG, JPEG, GIF, SVG, WebP |
 
 ### Reacting to JavaScript changes
 
-Chromium [removed live editing of JavaScript sources in Chrome 145](https://developer.chrome.com/blog/devtools-deprecates-live-editing), so swapping a running script's body is no longer possible in current browsers. hrserve still tries, but the dependable contract is the event:
+Chromium [removed live editing of JavaScript sources in Chrome 145](https://developer.chrome.com/blog/devtools-deprecates-live-editing), so a running script's body can no longer be swapped in place. hrserve **re-runs the new source** instead — indirect `eval` for classic scripts, `import()` of a cache-busted URL for ES modules — which means top-level side effects run again. The `script-patch` event fires *before* that happens, so your code can dispose of the old version:
 
 ```javascript
 window.addEventListener("script-patch", (event) => {
-  console.log("changed:", event.detail.scriptUrl);
-  // re-run initialization, refetch data, re-render — whatever your app needs
+  teardown();                                    // remove listeners, cancel timers, unmount
+  event.detail.accept((exports) => render(exports.App));  // optional: use the re-run's result
+  // event.preventDefault();                     // optional: handle the update yourself
 });
 ```
+
+See [JavaScript hot reload](https://github.com/sidorares/hrserve#javascript-hot-reload) for the full contract, the `scriptReload` option and the limitations of re-running.
 
 The `patch` event tells you what actually happened, which matters when a change *looks* applied but wasn't:
 
 ```javascript
 server.on("patch", ({ applied, reason }) => {
-  // applied: false, reason: "css-invalid: ..." | "stylesheet-not-loaded" | "live-edit-unavailable; ..."
+  // applied: false, reason: "css-invalid: ..." | "stylesheet-not-loaded"
+  //                       | "hot-update-threw: ..." | "cancelled-by-page; ..."
 });
 ```
 

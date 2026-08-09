@@ -35,7 +35,7 @@ Three useful properties fall out of that design, and most of hrserve's features 
 |---|---|
 | **CSS** | Applied via `CSS.setStyleSheetText` — no reload. Invalid CSS is rejected rather than applied. |
 | **HTML** | Full DOM replacement via `DOM.setOuterHTML`. |
-| **JavaScript** | A `script-patch` event is dispatched on the page so your code can react. (Chromium [removed LiveEdit in Chrome 145](https://developer.chrome.com/blog/devtools-deprecates-live-editing), so in-place source swapping is best-effort — see [Supported file types](./getting-started.md#what-gets-patched).) |
+| **JavaScript** | The new source is re-run — indirect `eval` for classic scripts, `import()` of a cache-busted URL for ES modules — after a `script-patch` event that lets your code dispose of the old version. (Chromium [removed LiveEdit in Chrome 145](https://developer.chrome.com/blog/devtools-deprecates-live-editing), so in-place source swapping is gone — see [Supported file types](./getting-started.md#what-gets-patched).) |
 | **Images** | Cache-busted everywhere they appear: `<img>`, `srcset`, `<picture>`, CSS backgrounds, inline styles, SVG `<image>`, favicons. |
 
 ## Beyond hot reload

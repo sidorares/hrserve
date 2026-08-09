@@ -4,6 +4,13 @@ import chokidar from "chokidar";
 import { validate } from "csstree-validator";
 import type { Browser, BrowserContext, CDPSession, Page, Request, Route } from "playwright";
 import { MockRouter } from "./mock-router";
+import {
+  type HotUpdateResult,
+  type ScriptReloadMode,
+  hotUpdateExpression,
+  isHotUpdateUrl,
+  resolveHotUpdateMode,
+} from "./patch-script";
 import { ProfileStore, type ProfileSummary, profileCoversUrl } from "./profiles";
 import { IMAGE_MIME_TYPES, reloadImage } from "./reload-image";
 import {
@@ -16,6 +23,7 @@ import { type Rule, normalizeRules } from "./rules";
 import { serveDirectoryListing } from "./serve-directory";
 
 export type { Rule, ServeRule, UpstreamRule, ProxyRule, MockRule } from "./rules";
+export type { ScriptReloadMode } from "./patch-script";
 export {
   ProfileStore,
   defaultProfilesDir,
@@ -42,6 +50,12 @@ interface ServeOptions {
    * call `saveProfile()` to snapshot the result under a new name.
    */
   profile?: string;
+  /**
+   * What to do when a watched JavaScript file changes. `"auto"` (the default)
+   * re-runs classic scripts and re-imports ES modules; `"off"` only dispatches
+   * the `script-patch` event. See {@link ScriptReloadMode}.
+   */
+  scriptReload?: ScriptReloadMode;
   width?: number;
   height?: number;
   /** Log request routing and CDP events. */
@@ -63,8 +77,8 @@ interface ServeOptions {
 /**
  * What actually happened to the page. `applied: false` means the change was
  * detected but not put into the page (invalid CSS, unknown stylesheet, a
- * browser without LiveEdit) — the distinction matters to anyone, human or
- * agent, asking "did my edit reach the page?".
+ * script whose new source threw) — the distinction matters to anyone, human
+ * or agent, asking "did my edit reach the page?".
  */
 export interface PatchOutcome {
   applied: boolean;
@@ -127,6 +141,8 @@ interface ScriptDetails {
   scriptId: string;
   executionContextId?: number;
   url: string;
+  /** How the browser parsed the file — decides re-run vs re-import. */
+  isModule?: boolean;
 }
 
 export interface ServerOptions {
@@ -146,6 +162,7 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
   let activeContext: BrowserContext | undefined;
   let activeProfile: string | undefined;
   let log: (...args: unknown[]) => void = () => {};
+  let scriptReload: ScriptReloadMode = "auto";
 
   // Setup patchers for different MIME types
   patchers.set("text/css", async ({ cdp }, url, newContent, fileName) => {
@@ -186,57 +203,58 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
     });
   }
 
-  let liveEditUnavailableWarned = false;
+  /** Bumped per update so each re-imported module URL is new to the module map. */
+  let hotUpdateVersion = 0;
   const patchScript: PatcherFunction = async ({ cdp }, url, scriptSource) => {
-    if (!scriptSource) return { applied: false, reason: "empty-content" };
+    if (scriptSource === undefined) return { applied: false, reason: "empty-content" };
 
-    let sourceSwapped = false;
-    let reason = "";
-
-    // Swapping the running source is best effort, but the script-patch event
-    // below is a documented contract and must fire on every change — including
-    // when Debugger.scriptParsed never told us about this URL (which happens
-    // for scripts the debugger did not register, e.g. under load or when the
-    // Debugger domain is unavailable).
+    // Debugger.setScriptSource (LiveEdit) is gone; see lib/patch-script.ts. The
+    // script-patch event is a documented contract and must fire on every change,
+    // including when Debugger.scriptParsed never told us about this URL — that
+    // just leaves us without the signal that says how to re-run the file.
     const scriptDetails = scriptUrlToDetails.get(url);
     if (!scriptDetails) {
-      log("no known script for", url);
-      reason = "script-not-registered-by-debugger";
-    } else {
-      try {
-        const result = await cdp.send("Debugger.setScriptSource", {
-          scriptId: scriptDetails.scriptId,
-          scriptSource,
-          allowTopFrameEditing: true,
-        });
-        sourceSwapped = result.status === "Ok";
-        if (!sourceSwapped) {
-          console.warn("Failed to patch script", result);
-          reason = `live-edit-rejected: ${result.status}`;
-        }
-      } catch (e) {
-        // Chromium removed LiveEdit (Debugger.setScriptSource) in Chrome 145:
-        // https://developer.chrome.com/blog/devtools-deprecates-live-editing
-        // The script-patch event below is the reliable way for pages to react.
-        if (!liveEditUnavailableWarned) {
-          liveEditUnavailableWarned = true;
-          console.warn("Live script patching unavailable in this browser:", (e as Error).message);
-        }
-        reason = "live-edit-unavailable";
-      }
+      log("no known script for", url, "- dispatching script-patch only");
+    }
+    const mode = resolveHotUpdateMode(scriptReload, scriptDetails?.isModule);
+    hotUpdateVersion += 1;
+
+    const { result, exceptionDetails } = await cdp.send("Runtime.evaluate", {
+      expression: hotUpdateExpression({
+        url,
+        mode,
+        source: scriptSource,
+        version: hotUpdateVersion,
+      }),
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (exceptionDetails) {
+      // The wrapper itself failed (it catches page errors, so this is a bug or a
+      // detached context) — the page was not even notified.
+      const detail = exceptionDetails.exception?.description ?? exceptionDetails.text;
+      console.warn("Failed to hot-update", url, detail);
+      return { applied: false, reason: `cdp-error: ${detail}` };
     }
 
-    // Let page code react to the change (e.g. re-run initialization).
-    const detail = JSON.stringify({ detail: { scriptUrl: url } });
-    await cdp.send("Runtime.evaluate", {
-      expression: `window.dispatchEvent(new CustomEvent('script-patch', ${detail}))`,
-    });
-
-    // Without LiveEdit the page was told about the change but the running
-    // script is unchanged; say so rather than claiming a successful patch.
-    return sourceSwapped
-      ? { applied: true }
-      : { applied: false, reason: `${reason}; script-patch event dispatched` };
+    const outcome = result.value as HotUpdateResult | undefined;
+    switch (outcome?.status) {
+      case "applied":
+        log("script hot update", url, `(mode: ${mode})`);
+        return { applied: true };
+      case "failed":
+        console.warn(`Hot update of ${url} threw:`, outcome.message);
+        return { applied: false, reason: `hot-update-threw: ${outcome.message}` };
+      case "cancelled":
+        // A script-patch listener called preventDefault() and is applying the
+        // change itself, so hrserve did not.
+        return { applied: false, reason: "cancelled-by-page; script-patch event dispatched" };
+      default: {
+        const why =
+          scriptReload === "off" ? "script-reload-disabled" : "script-not-registered-by-debugger";
+        return { applied: false, reason: `${why}; script-patch event dispatched` };
+      }
+    }
   };
   // mime-db has historically flip-flopped between the two names for .js
   patchers.set("application/javascript", patchScript);
@@ -257,10 +275,19 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
 
   // Main server functionality
   server.serve = async (options: ServeOptions): Promise<Page> => {
-    const { url: targetUrl, dir, rules, width = 1280, height = 720, verbose = false } = options;
+    const {
+      url: targetUrl,
+      dir,
+      rules,
+      width = 1280,
+      height = 720,
+      verbose = false,
+      scriptReload: scriptReloadOption = "auto",
+    } = options;
     if (verbose) {
       log = (...args: unknown[]) => console.log(...args);
     }
+    scriptReload = scriptReloadOption;
 
     const routeConfig: ResolveConfig = {
       baseUrl: normalizeBaseUrl(targetUrl),
@@ -303,6 +330,9 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
     await cdp.send("Runtime.enable");
 
     cdp.on("Debugger.scriptParsed", (event) => {
+      // Skip our own cache-busted re-imports: they would add one dead map entry
+      // per edit, and the original URL is the one patchers look up.
+      if (isHotUpdateUrl(event.url)) return;
       scriptUrlToDetails.set(event.url, event as ScriptDetails);
     });
 
@@ -417,7 +447,10 @@ export function createServer(browser: Browser, options: ServerOptions = {}): HRS
           });
 
           const patcher = patchers.get(mimeType);
-          if (patcher && !watchers.has(url)) {
+          // A re-import request is hrserve fetching the file it is already
+          // watching; watching the cache-busted URL as well would double the
+          // patch events (and double them again on every subsequent edit).
+          if (patcher && !isHotUpdateUrl(url) && !watchers.has(url)) {
             const watcher = chokidar.watch(filePath);
             watcher.on("change", async () => {
               try {

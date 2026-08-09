@@ -24,6 +24,7 @@ Starts serving and watching. Resolves with the Playwright `Page` after the first
 | `dir` | `string` | Directory to serve from (optional when every rule sets its own `dir`) |
 | `rules` | `Rule[]` | Ordered [routing rules](./routing.md); first match wins |
 | `profile` | `string` | Saved [profile](./profiles.md) to start from |
+| `scriptReload` | `"auto" \| "evaluate" \| "import" \| "off"` | How changed JavaScript is applied (default `"auto"`: re-run classic scripts, re-import ES modules) |
 | `width` / `height` | `number` | Viewport size (default 1280×720) |
 | `verbose` | `boolean` | Log request routing and CDP events |
 | `onPage` | `(page) => unknown` | Called after interception is installed but **before** the first navigation — the only place to attach listeners that must not miss the initial load |
@@ -46,7 +47,7 @@ server.on("new-resource", ({ url, mimeType }) => {});
 
 | Event | When | Notes |
 |---|---|---|
-| `patch` | Once per file change | `applied: false` means the change was seen but not put into the page; `reason` says why (`css-invalid`, `stylesheet-not-loaded`, `live-edit-unavailable`, …) |
+| `patch` | Once per file change | `applied: false` means the change was seen but not put into the page; `reason` says why (`css-invalid`, `stylesheet-not-loaded`, `hot-update-threw`, `cancelled-by-page`, …) |
 | `request` | Every intercepted request | `kind` is the routing decision: `file`, `fallback`, `mock`, `proxy` or `pass` |
 | `new-resource` | A served file starts being watched | |
 
