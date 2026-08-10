@@ -51,9 +51,7 @@
     "live module updating",
     "live module reloading"
   ],
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@types/mime-types": "^2.1.4",

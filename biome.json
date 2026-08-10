@@ -48,5 +48,11 @@
       "indentStyle": "space",
       "indentWidth": 2
     }
-  }
+  },
+  "overrides": [
+    {
+      "include": ["package.json", "package-lock.json"],
+      "formatter": { "enabled": false }
+    }
+  ]
 }
